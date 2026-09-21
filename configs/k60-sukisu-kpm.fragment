@@ -113,6 +113,36 @@ CONFIG_MODULE_UNLOAD=y
 # in the build depends on it being explicitly set.
 
 # ---------------------------------------------------------------------------
+# Arm errata workarounds that emit `alternative_insn` sequences
+# ---------------------------------------------------------------------------
+# STATUS: this is a HYPOTHESIS being tested by CI, not a confirmed fix.
+#
+# The remaining build failure is 23x, all inside the kernel_entry macro:
+#     arch/arm64/kernel/entry.S:700: Error: attempt to move .org backwards
+#     arch/arm64/kernel/entry.S:831: Error: bad or irreducible absolute expression
+#
+# These arise from `alternative_insn` expansions. That macro pads with
+#     .org . - (664b-663b) + (662b-661b)
+# which assumes the two instruction slots are the SAME width; when they differ the
+# directive "moves backwards" and GNU as rejects it. Candidate call sites are erratum
+# workarounds whose alternatives have different encodings:
+#     entry.S:481  alternative_insn nop, "dmb sy", ARM64_WORKAROUND_1508412
+#     entry.S:959  alternative_insn isb, nop, ARM64_WORKAROUND_QCOM_FALKOR_E1003
+#
+# Some ARM64_* symbols are `def_bool y` options and CAN be pinned from a defconfig
+# (unlike CONFIG_BROKEN_GAS_INST, which is recomputed). Whether pinning these actually
+# removes the failing expansions is what the next CI run determines.
+#
+# IMPORTANT: disabling an erratum workaround is a genuine behavioural tradeoff on
+# affected silicon. If this does unblock the build, the correct long-term fix is a
+# toolchain/assembler that handles the macro - not shipping a kernel that silently drops
+# errata mitigations. Treat this block as an experiment, not a solution.
+# CONFIG_ARM64_ERRATUM_1508412 is not set
+# CONFIG_ARM64_ERRATUM_1418040 is not set
+# CONFIG_QCOM_FALKOR_ERRATUM_1003 is not set
+# CONFIG_QCOM_FALKOR_ERRATUM_1009 is not set
+
+# ---------------------------------------------------------------------------
 # Baseband Guard (BBG) — kernel-level baseband partition protection
 # ---------------------------------------------------------------------------
 # vc-teahouse/Baseband-guard: an LSM that default-DENIES writes to block devices
