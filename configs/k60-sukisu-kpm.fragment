@@ -58,6 +58,27 @@ CONFIG_KALLSYMS_BASE_RELATIVE=y
 CONFIG_MODULE_UNLOAD=y
 
 # ---------------------------------------------------------------------------
+# Assembler: must match the LLVM_IAS setting used by scripts/build-kernel.sh
+# ---------------------------------------------------------------------------
+# arch/arm64/include/asm/sysreg.h:50 selects between two encodings of __emit_inst():
+#   #ifndef CONFIG_BROKEN_GAS_INST   ->  .inst(x)      (integrated assembler)
+#   #else                            ->  .long __INSTR_BSWAP(x)   (old GNU as workaround)
+#
+# CONFIG_BROKEN_GAS_INST is defined as
+#   def_bool !$(as-instr,1:\n.inst 0\n.rept . - 1b\n\nnop\n.endr\n)
+# i.e. it is auto-derived from an assembler capability probe. That probe does not apply
+# the integrated-assembler flag, so it can conclude "broken" even when clang's integrated
+# assembler handles .inst perfectly well.
+#
+# When that mismatch happens the .long form is emitted and the C preprocessor splits the
+# nested expression into extra macro arguments, producing:
+#   arch/arm64/kvm/hyp/entry.S:112: error: too many positional arguments
+#
+# scripts/build-kernel.sh builds with LLVM_IAS=1 (required by LTO), so the .inst form is
+# the correct one. Pin it explicitly rather than relying on the probe.
+# CONFIG_BROKEN_GAS_INST is not set
+
+# ---------------------------------------------------------------------------
 # Baseband Guard (BBG) — kernel-level baseband partition protection
 # ---------------------------------------------------------------------------
 # vc-teahouse/Baseband-guard: an LSM that default-DENIES writes to block devices
