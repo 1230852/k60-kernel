@@ -129,6 +129,21 @@ else
 	echo "  ok   CONFIG_KSU_MANUAL_HOOK is not set"
 fi
 
+# The assembler encoding of __emit_inst() must agree with LLVM_IAS. See the fragment:
+# with LLVM_IAS=1 the tree needs the `.inst` form, i.e. CONFIG_BROKEN_GAS_INST unset.
+# A mismatch surfaces much later as "error: too many positional arguments" while
+# assembling arch/arm64/kvm/hyp/entry.S, so check it up front instead.
+if [ "$LLVM_IAS" = "1" ]; then
+	if grep -qE '^CONFIG_BROKEN_GAS_INST=y$' "$OUT/.config"; then
+		echo "  FAIL CONFIG_BROKEN_GAS_INST=y while LLVM_IAS=1"
+		echo "       -> __emit_inst() would use the .long form, which the integrated"
+		echo "          assembler cannot parse (arch/arm64/kvm/hyp/entry.S will fail)"
+		fail=1
+	else
+		echo "  ok   CONFIG_BROKEN_GAS_INST unset (matches LLVM_IAS=1)"
+	fi
+fi
+
 if [ "$K60_CFI_MODE" = off ]; then
 	if grep -qE '^CONFIG_CFI_CLANG=y$' "$OUT/.config"; then
 		echo "  FAIL CONFIG_CFI_CLANG still =y but mode=off"; fail=1
