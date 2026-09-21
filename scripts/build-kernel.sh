@@ -132,6 +132,15 @@ require_y CONFIG_KALLSYMS
 require_y CONFIG_KALLSYMS_ALL
 require_y CONFIG_BBG
 
+# KASAN must stay off: it is a debug feature (gki_defconfig enables it) and it broke the
+# arm64 entry assembly with ".org backwards" / "bad or irreducible absolute expression".
+if grep -qE '^CONFIG_KASAN=y$' "$OUT/.config"; then
+	echo "  FAIL CONFIG_KASAN=y (debug feature; breaks arm64 entry.S assembly)"
+	fail=1
+else
+	echo "  ok   CONFIG_KASAN disabled"
+fi
+
 # BBG's Makefile has a hard $(error) gate on CONFIG_LSM containing "baseband_guard".
 # Assert it here so a silent config drop is caught before the compiler runs.
 if grep -qE '^CONFIG_LSM=".*(^|,)baseband_guard(,|")' "$OUT/.config"; then
