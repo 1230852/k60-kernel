@@ -31,8 +31,11 @@ on:
         description: 'Package device trees into the zip? 0 = no (tree lacks vendor DTS)'
         required: true
         default: '0'
-  push:
-    branches: [main, master]
+
+# NOTE: deliberately NO `push:` trigger.
+# Pushing the 9 repository files one-by-one via the Contents API creates one commit
+# each, so a push trigger starts a full kernel build per file (9 concurrent builds on
+# a 4-core runner). Builds are started explicitly via workflow_dispatch instead.
 
 jobs:
   build:
