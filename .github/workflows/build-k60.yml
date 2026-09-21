@@ -1,0 +1,182 @@
+name: Build K60 kernel (SukiSU-Ultra + KPM)
+
+# The kernel source and SukiSU-Ultra are fetched from upstream tarballs at build time,
+# so this repository stays tiny and every input is pinned and auditable. The git protocol
+# is unusable on the network this was developed on; codeload.github.com over HTTPS works.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'Kernel repo (owner/name)'
+        required: true
+        default: 'MiCode/Xiaomi_Kernel_OpenSource'
+      kernel_branch:
+        description: 'Kernel branch (mondrian-s-oss = Redmi K60 standard / SM8475)'
+        required: true
+        default: 'mondrian-s-oss'
+      sukisu_branch:
+        description: 'SukiSU-Ultra ref (branch or tag)'
+        required: true
+        default: 'main'
+      bbg_branch:
+        description: 'Baseband-guard ref (branch or tag)'
+        required: true
+        default: 'main'
+      cfi_mode:
+        description: 'CFI mode: off (SukiSU-compatible) | thin | full'
+        required: true
+        default: 'off'
+      with_dtb:
+        description: 'Package device trees into the zip? 0 = no (tree lacks vendor DTS)'
+        required: true
+        default: '0'
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (clang + aarch64 gcc) and build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-14 lld-14 llvm-14 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            python3 zip unzip curl cpio kmod rsync device-tree-compiler zstd
+          sudo ln -sf /usr/bin/clang-14 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-14 /usr/local/bin/ld.lld
+          for t in ar nm objcopy objdump readelf strip; do
+            sudo ln -sf /usr/bin/llvm-$t-14 /usr/local/bin/llvm-$t
+          done
+          echo "--- clang ---"; clang --version | head -n2
+          echo "--- aarch64 gcc ---"; aarch64-linux-gnu-gcc --version | head -n1
+          echo "--- ld.lld ---"; ld.lld --version
+
+      - name: Fetch kernel source
+        env:
+          KREPO: ${{ github.event.inputs.kernel_repo || 'MiCode/Xiaomi_Kernel_OpenSource' }}
+          KBRANCH: ${{ github.event.inputs.kernel_branch || 'mondrian-s-oss' }}
+        run: |
+          set -euo pipefail
+          URL="https://codeload.github.com/${KREPO}/tar.gz/refs/heads/${KBRANCH}"
+          echo "fetching $URL"
+          curl -fSL --retry 3 -o kernel.tar.gz "$URL"
+          ls -lh kernel.tar.gz
+          echo "sha256: $(sha256sum kernel.tar.gz)"
+          mkdir -p kernel
+          tar -xzf kernel.tar.gz -C kernel --strip-components=1
+          rm -f kernel.tar.gz
+          echo "--- sanity ---"
+          test -f kernel/Makefile
+          test -f kernel/arch/arm64/configs/gki_defconfig
+          test -f kernel/arch/arm64/configs/vendor/mondrian_GKI.config
+          test -f kernel/arch/arm64/configs/vendor/mondrian_consolidate.config
+          test -f kernel/drivers/Makefile
+          echo "kernel tree OK: $(find kernel -type f | wc -l) files"
+          grep -m1 '^VERSION\|^PATCHLEVEL\|^SUBLEVEL' kernel/Makefile | head -n3 || true
+          head -n5 kernel/Makefile
+
+      - name: Fetch SukiSU-Ultra
+        env:
+          SBRANCH: ${{ github.event.inputs.sukisu_branch || 'main' }}
+        run: |
+          set -euo pipefail
+          URL="https://codeload.github.com/SukiSU-Ultra/SukiSU-Ultra/tar.gz/refs/heads/${SBRANCH}"
+          echo "fetching $URL"
+          curl -fSL --retry 3 -o sukisu.tar.gz "$URL"
+          echo "sha256: $(sha256sum sukisu.tar.gz)"
+          mkdir -p sukisu
+          tar -xzf sukisu.tar.gz -C sukisu --strip-components=1
+          rm -f sukisu.tar.gz
+          test -f sukisu/kernel/setup.sh
+          test -f sukisu/kernel/Kconfig
+          test -d sukisu/uapi
+          echo "SukiSU-Ultra OK: $(find sukisu -type f | wc -l) files"
+
+      - name: Fetch Baseband-guard (BBG)
+        env:
+          BBRANCH: ${{ github.event.inputs.bbg_branch || 'main' }}
+        run: |
+          set -euo pipefail
+          URL="https://codeload.github.com/vc-teahouse/Baseband-guard/tar.gz/refs/heads/${BBRANCH}"
+          echo "fetching $URL"
+          curl -fSL --retry 3 -o bbg.tar.gz "$URL"
+          echo "sha256: $(sha256sum bbg.tar.gz)"
+          mkdir -p bbg
+          tar -xzf bbg.tar.gz -C bbg --strip-components=1
+          rm -f bbg.tar.gz
+          test -f bbg/baseband_guard.c
+          test -f bbg/Kconfig
+          test -f bbg/Makefile
+          echo "Baseband-guard OK: $(find bbg -type f | wc -l) files"
+
+      - name: Integrate SukiSU-Ultra into kernel tree
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/integrate-sukisu.sh kernel sukisu "${{ github.event.inputs.sukisu_branch || 'main' }}"
+
+      - name: Integrate Baseband-guard into kernel tree
+        run: |
+          ./scripts/integrate-bbg.sh kernel bbg
+
+      - name: Stage build config
+        run: |
+          mkdir -p kernel/configs
+          cp configs/k60-sukisu-kpm.fragment kernel/configs/
+          ls -la kernel/configs/
+
+      - name: Device tree pre-flight
+        run: |
+          ./scripts/dts-preflight.sh kernel
+
+      - name: Build kernel
+        env:
+          K60_CFI_MODE: ${{ github.event.inputs.cfi_mode || 'off' }}
+          JOBS: '4'
+        run: |
+          ./scripts/build-kernel.sh kernel
+
+      - name: Package AnyKernel3 zip
+        env:
+          WITH_DTB: ${{ github.event.inputs.with_dtb || '0' }}
+        run: |
+          ./scripts/package-anykernel3.sh kernel
+
+      - name: Upload kernel image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k60-kernel-image
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/Image.gz
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload AnyKernel3 zip
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k60-anykernel3-zip
+          path: kernel/out/*.zip
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload .config and build log evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k60-build-config
+          path: |
+            kernel/out/.config
+            kernel/out/include/config/kernel.release
+          if-no-files-found: warn
+          retention-days: 30
