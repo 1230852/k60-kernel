@@ -1,0 +1,87 @@
+# SukiSU-Ultra + KernelPatchModule (KPM) defconfig fragment
+# Target: Redmi K60 (mondrian, SM8475), Xiaomi_Kernel_OpenSource branch mondrian-s-oss (5.10 GKI)
+#
+# Applied on top of the mondrian "consolidate" chain:
+#   gki_defconfig
+#     + common/arch/arm64/configs/consolidate.fragment   (absent in this tarball, see note)
+#     + arch/arm64/configs/vendor/mondrian_GKI.config
+#     + arch/arm64/configs/vendor/mondrian_consolidate.config
+#
+# NOTE: in the plain MiCode tarball everything sits at the tree root, so
+# `common/arch/arm64/configs/consolidate.fragment` does not exist. The build script must
+# therefore merge gki_defconfig + the two vendor configs directly, then this fragment last.
+
+# ---------------------------------------------------------------------------
+# SukiSU-Ultra core
+# ---------------------------------------------------------------------------
+# Kconfig dependency chain (verified in drivers/kernelsu/Kconfig):
+#   config KSU  -> depends on KPROBES && EXT4_FS
+#   config KPM  -> depends on KSU && 64BIT, and selects KALLSYMS + KALLSYMS_ALL
+# All of KPROBES, EXT4_FS, MODULES and KALLSYMS_ALL are already =y in gki_defconfig,
+# so these two are the only additions actually needed.
+CONFIG_KSU=y
+CONFIG_KPM=y
+
+# Hook selection. The GKI-default kprobe hook is the documented option for a bootable
+# GKI-derived kernel; it requires CONFIG_KPROBES=y (present) and MANUAL_HOOK to be OFF.
+# CONFIG_KSU_MANUAL_HOOK is not set
+# CONFIG_KSU_TRACEPOINT_HOOK is not set
+
+# Keep the manager APK integration and per-app policy profiles enabled (upstream defaults).
+# CONFIG_KSU_DISABLE_MANAGER is not set
+# CONFIG_KSU_DISABLE_POLICY is not set
+
+# ---------------------------------------------------------------------------
+# CFI / LTO — the critical compatibility decision
+# ---------------------------------------------------------------------------
+# gki_defconfig ships CONFIG_CFI_CLANG=y with CONFIG_LTO_CLANG_FULL=y.
+# Clang CFI is a known conflict with KernelSU-style kprobe hooking: the kprobe
+# trampoline calls through function pointers whose types do not match the CFI
+# signature check, so hooks either fail to install or panic.
+# Disable CFI and drop to thin LTO for the rooted build.
+#
+# Provide -DK60_CFI_MODE=off|thin|full to build.sh to change this behaviour.
+# CONFIG_CFI_CLANG is not set
+CONFIG_LTO_CLANG=y
+CONFIG_LTO_CLANG_THIN=y
+# CONFIG_LTO_CLANG_FULL is not set
+
+# ---------------------------------------------------------------------------
+# Extras that make root/verification workflows observable
+# ---------------------------------------------------------------------------
+# Needed by KPM's kallsyms-based symbol resolution and by userspace tooling.
+CONFIG_KALLSYMS=y
+CONFIG_KALLSYMS_ALL=y
+CONFIG_KALLSYMS_BASE_RELATIVE=y
+
+# Keep module unload/loading flexible for vendor_dlkm (BUILD_VENDOR_DLKM=1 in build.config).
+CONFIG_MODULE_UNLOAD=y
+
+# ---------------------------------------------------------------------------
+# Baseband Guard (BBG) — kernel-level baseband partition protection
+# ---------------------------------------------------------------------------
+# vc-teahouse/Baseband-guard: an LSM that default-DENIES writes to block devices
+# except an allowlist (boot/init_boot/vendor_boot/dtbo/userdata/cache/metadata/
+# misc/vbmeta*/recovery). So modem, fsg, persist, abl, xbl, ... are protected by
+# default — that is the "protect the baseband" requirement.
+#
+# A process is treated as "untrusted" when its SELinux domain is su / ksu / magisk,
+# so this specifically blocks a ROOTED process from touching the baseband.
+CONFIG_BBG=y
+
+# !! MANDATORY. BBG's Makefile contains a hard gate:
+#      if DEFINE_LSM exists and "baseband_guard" is not in CONFIG_LSM -> $(error ...)
+# This kernel (5.10) HAS DEFINE_LSM, so the build ABORTS without this line.
+#
+# gki_defconfig does not set CONFIG_LSM at all, so the effective value otherwise
+# comes from security/Kconfig's default:
+#      "lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf"
+# We set it explicitly (as this tree's own generic_vm_defconfig does) and append
+# baseband_guard. Doing it in the defconfig is deliberate: upstream's suggested sed
+# on security/Kconfig is documented by upstream itself as corrupting the defaults.
+CONFIG_LSM="lockdown,yama,loadpin,safesetid,integrity,selinux,baseband_guard,smack,tomoyo,apparmor,bpf"
+
+# Optional extra hardening (both default n upstream). Left off because they block
+# flashing kernels/recoveries from inside a booted Android system:
+# CONFIG_BBG_BLOCK_BOOT is not set
+# CONFIG_BBG_BLOCK_RECOVERY is not set
