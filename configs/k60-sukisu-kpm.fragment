@@ -58,25 +58,28 @@ CONFIG_KALLSYMS_BASE_RELATIVE=y
 CONFIG_MODULE_UNLOAD=y
 
 # ---------------------------------------------------------------------------
-# Assembler: must match the LLVM_IAS setting used by scripts/build-kernel.sh
+# Assembler / LTO consistency (see scripts/build-kernel.sh)
 # ---------------------------------------------------------------------------
-# arch/arm64/include/asm/sysreg.h:50 selects between two encodings of __emit_inst():
+# arch/arm64/include/asm/sysreg.h:50 picks the encoding of __emit_inst():
 #   #ifndef CONFIG_BROKEN_GAS_INST   ->  .inst(x)      (integrated assembler)
 #   #else                            ->  .long __INSTR_BSWAP(x)   (old GNU as workaround)
 #
-# CONFIG_BROKEN_GAS_INST is defined as
+# CONFIG_BROKEN_GAS_INST is declared as
 #   def_bool !$(as-instr,1:\n.inst 0\n.rept . - 1b\n\nnop\n.endr\n)
-# i.e. it is auto-derived from an assembler capability probe. That probe does not apply
-# the integrated-assembler flag, so it can conclude "broken" even when clang's integrated
-# assembler handles .inst perfectly well.
+# It has NO prompt, so olddefconfig RECOMPUTES it and it CANNOT be pinned here. An earlier
+# attempt to write `# CONFIG_BROKEN_GAS_INST is not set` in this fragment had no effect -
+# confirmed by CI, which still reported CONFIG_BROKEN_GAS_INST=y.
 #
-# When that mismatch happens the .long form is emitted and the C preprocessor splits the
-# nested expression into extra macro arguments, producing:
-#   arch/arm64/kvm/hyp/entry.S:112: error: too many positional arguments
+# Therefore the consistency has to be arranged the other way round, by build-kernel.sh:
+#   default   K60_LTO=none (LTO off) + LLVM_IAS=0
+#             -> the probe's "broken GAS" verdict matches the actual GNU as, and the
+#                .long encoding is correct
+#   optional  K60_LTO=thin|full + K60_LLVM_IAS=1
+#             -> requires the probe to report .inst support; if it does not, assembly of
+#                arch/arm64/kvm/hyp/entry.S fails with "too many positional arguments"
 #
-# scripts/build-kernel.sh builds with LLVM_IAS=1 (required by LTO), so the .inst form is
-# the correct one. Pin it explicitly rather than relying on the probe.
-# CONFIG_BROKEN_GAS_INST is not set
+# LTO is off by default because it is optional for this project (SukiSU, KPM and BBG do
+# not require it) while being the sole source of this assembler conflict.
 
 # ---------------------------------------------------------------------------
 # Baseband Guard (BBG) — kernel-level baseband partition protection
