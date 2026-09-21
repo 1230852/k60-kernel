@@ -194,7 +194,30 @@ grep -E '^CONFIG_(KSU|KPM|BBG|KPROBES|CFI_CLANG|LTO_CLANG\w*)=' "$OUT/.config" |
 grep -E '^CONFIG_LSM=' "$OUT/.config" | sed 's/^/    /'
 
 echo "==> compiling (long step)"
-"${MK[@]}" Image.gz dtbs
+# K60_VERBOSE=1 records full command lines but filters them down to assembler invocations
+# and their errors, so a failing `clang ... entry.S` can be diagnosed without producing a
+# multi-hundred-megabyte log. The build always runs unfiltered; the filtered output is a
+# diagnostic aid on top of it.
+if [ "${K60_VERBOSE:-0}" = "1" ]; then
+	echo "    verbose diagnostics enabled: capturing assembler command lines"
+	mkdir -p "$OUT/logs"
+	if "${MK[@]}" V=1 Image.gz dtbs > "$OUT/logs/build-verbose.log" 2>&1; then
+		BUILD_RC=0
+	else
+		BUILD_RC=$?
+	fi
+	echo "    --- assembler command lines and errors (bounded) ---"
+	grep -E '(^| )AS +|\.S:[0-9]+.*(Error|error)|assembler command failed|-no-integrated-as|-integrated-as|-Wa,|(^| )clang .*\.S' \
+		"$OUT/logs/build-verbose.log" | head -n 300
+	echo "    --- end of filtered diagnostics (full log: $OUT/logs/build-verbose.log) ---"
+	if [ "$BUILD_RC" -ne 0 ]; then
+		echo "==> build failed (rc=$BUILD_RC); last 60 lines of the full log"
+		tail -n 60 "$OUT/logs/build-verbose.log"
+		exit "$BUILD_RC"
+	fi
+else
+	"${MK[@]}" Image.gz dtbs
+fi
 
 echo "==> outputs"
 ls -lh "$OUT/arch/$ARCH/boot/Image" "$OUT/arch/$ARCH/boot/Image.gz" 2>/dev/null || true
