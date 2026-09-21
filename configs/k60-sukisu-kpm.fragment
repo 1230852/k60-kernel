@@ -82,6 +82,37 @@ CONFIG_MODULE_UNLOAD=y
 # not require it) while being the sole source of this assembler conflict.
 
 # ---------------------------------------------------------------------------
+# Debug features that must be OFF for a usable kernel
+# ---------------------------------------------------------------------------
+# gki_defconfig is the GKI *debug* configuration and enables KASAN:
+#   CONFIG_KASAN=y
+#   CONFIG_KASAN_HW_TAGS=y
+#
+# Two independent reasons to disable it here:
+#   1. KASAN is a debugging tool. It costs substantial CPU and memory (shadow memory,
+#      per-access checks) and is not used by shipping device kernels.
+#   2. It broke this build. KASAN instrumentation interacts badly with the arm64 entry
+#      assembly, producing (observed in CI):
+#         arch/arm64/kernel/entry.S:700: Error: attempt to move .org backwards
+#         arch/arm64/kernel/entry.S:831: Error: bad or irreducible absolute expression
+#      i.e. dozens of failures across the kernel_entry macro.
+#
+# Keep this off unless you are specifically debugging memory errors.
+# CONFIG_KASAN is not set
+# CONFIG_KASAN_HW_TAGS is not set
+# CONFIG_KASAN_GENERIC is not set
+# CONFIG_KASAN_SW_TAGS is not set
+# CONFIG_KASAN_INLINE is not set
+# CONFIG_KASAN_OUTLINE is not set
+# CONFIG_KASAN_STACK is not set
+# CONFIG_KASAN_VMALLOC is not set
+# CONFIG_KASAN_MODULE_TEST is not set
+# CONFIG_KASAN_KUNIT_TEST is not set
+
+# Match the scale shift that the (now disabled) KASAN would have defined, so nothing else
+# in the build depends on it being explicitly set.
+
+# ---------------------------------------------------------------------------
 # Baseband Guard (BBG) — kernel-level baseband partition protection
 # ---------------------------------------------------------------------------
 # vc-teahouse/Baseband-guard: an LSM that default-DENIES writes to block devices
