@@ -185,12 +185,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Collect config evidence
+        if: always()
+        run: |
+          # `.config` is a hidden file; artifact upload of dotfiles by explicit path is
+          # unreliable, so copy it to a normal filename and capture the settings that
+          # decide whether this build can work at all.
+          if [ -f kernel/out/.config ]; then
+            cp kernel/out/.config kernel/out/kernel-config.txt
+            echo "=== effective toolchain-critical config ==="
+            grep -E '^CONFIG_(LTO_CLANG\w*|CFI_CLANG|KSU|KPM|BBG|LSM|PROBES|KALLSYMS\w*|CC_IS_CLANG|ARM64)=' \
+              kernel/out/.config || true
+            grep -E '^# CONFIG_(LTO_CLANG\w*|CFI_CLANG) is not set$' kernel/out/.config || true
+          else
+            echo "no .config produced"
+          fi
+
       - name: Upload .config and build log evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: k60-build-config
           path: |
+            kernel/out/kernel-config.txt
             kernel/out/.config
             kernel/out/include/config/kernel.release
           if-no-files-found: warn
