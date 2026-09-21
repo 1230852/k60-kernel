@@ -121,12 +121,15 @@ jobs:
           test -f bbg/Makefile
           echo "Baseband-guard OK: $(find bbg -type f | wc -l) files"
 
-      - name: Fix missing hwid module (unpublished by Xiaomi)
+      - name: Fix driver dirs referenced but not published by Xiaomi
         run: |
-          # The mondrian-s-oss drop references drivers/misc/hwid/ but does not ship it,
-          # which aborts `make olddefconfig` with:
+          # The mondrian-s-oss drop references driver directories it does not ship, which
+          # aborts `make olddefconfig` with e.g.:
           #   drivers/misc/Kconfig:540: can't open file "drivers/misc/hwid/Kconfig"
-          bash scripts/fix-missing-hwid.sh kernel
+          #   drivers/misc/Kconfig:542: can't open file "drivers/misc/plaid/Kconfig"
+          # The script scans the WHOLE tree for such references and creates inert
+          # placeholders, so a further unpublished module surfaces here, not in the build.
+          bash scripts/fix-missing-kconfig-dirs.sh kernel
 
       - name: Integrate SukiSU-Ultra into kernel tree
         run: |
