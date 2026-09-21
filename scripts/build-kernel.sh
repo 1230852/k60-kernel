@@ -20,6 +20,7 @@ ARCH=arm64
 OUT="${OUT:-$REPO_ROOT/out}"
 JOBS="${JOBS:-$(nproc)}"
 K60_CFI_MODE="${K60_CFI_MODE:-off}"
+K60_LTO="${K60_LTO:-none}"
 FRAGMENT="${FRAGMENT:-$REPO_ROOT/configs/k60-sukisu-kpm.fragment}"
 
 export ARCH
@@ -45,15 +46,24 @@ export HOSTCC="${HOSTCC:-clang}"
 export HOSTCXX="${HOSTCXX:-clang++}"
 export HOSTLD="${HOSTLD:-ld.lld}"
 export HOSTAR="${HOSTAR:-llvm-ar}"
-# LLVM_IAS=1 -> clang's integrated assembler.
+# LLVM_IAS=1 -> clang's integrated assembler; 0 -> GNU as via `-no-integrated-as`.
 #
-# This MUST be 1 when LTO is enabled. With LLVM_IAS=0 the Makefile adds
-# `-no-integrated-as` (Makefile:589-591) and hands assembly to GNU as, which cannot
-# resolve the absolute expressions clang emits under LTO. The observed failure was
-# dozens of errors of the form:
-#     ../arch/arm64/kernel/entry.S:700: Error: bad or irreducible absolute expression
-# Set K60_LLVM_IAS=0 to force the old behaviour (only useful if you also disable LTO).
-export LLVM_IAS="${K60_LLVM_IAS:-1}"
+# This must AGREE with the LTO setting, because arch/arm64/include/asm/sysreg.h:50 chooses
+# the encoding of __emit_inst() from CONFIG_BROKEN_GAS_INST:
+#   unset -> .inst(x)                (integrated assembler)
+#   set   -> .long __INSTR_BSWAP(x)  (old GNU as workaround)
+#
+# CONFIG_BROKEN_GAS_INST is `def_bool !$(as-instr,...)`, i.e. an auto-derived symbol with
+# no prompt. olddefconfig RECOMPUTES it, so it cannot be pinned from a defconfig fragment.
+# With LTO enabled we must use the integrated assembler, but the probe still reports
+# "broken" (it does not apply the integrated-assembler flag), so the .long form is emitted
+# and the assembler rejects it:
+#     arch/arm64/kvm/hyp/entry.S:112: error: too many positional arguments
+#
+# Resolution: default to LTO disabled + LLVM_IAS=0. This is the self-consistent
+# combination that this tree actually supports. Set K60_LTO=thin|full together with
+# K60_LLVM_IAS=1 to experiment with LTO.
+export LLVM_IAS="${K60_LLVM_IAS:-0}"
 
 MK=(make -j"$JOBS" O="$OUT")
 
@@ -89,11 +99,20 @@ sed -i -e '/^CONFIG_CFI_CLANG=y$/d' \
 grep -vE '^CONFIG_(CFI_CLANG|LTO_CLANG|LTO_CLANG_THIN|LTO_CLANG_FULL)=|^# CONFIG_(CFI_CLANG|LTO_CLANG|LTO_CLANG_THIN|LTO_CLANG_FULL) ' \
 	"$FRAGMENT" >> "$OUT/.config"
 
+# CFI and LTO are chosen together because both interact with the assembler path.
+#   K60_LTO=none (default) -> no LTO, compatible with LLVM_IAS=0 / CONFIG_BROKEN_GAS_INST=y
+#   K60_LTO=thin|full      -> requires LLVM_IAS=1, see the note at the top of this script
 case "$K60_CFI_MODE" in
-off)  printf '%s\n' '# CONFIG_CFI_CLANG is not set' 'CONFIG_LTO_CLANG=y' 'CONFIG_LTO_CLANG_THIN=y' '# CONFIG_LTO_CLANG_FULL is not set' >> "$OUT/.config" ;;
-thin) printf '%s\n' 'CONFIG_CFI_CLANG=y' 'CONFIG_LTO_CLANG=y' 'CONFIG_LTO_CLANG_THIN=y' '# CONFIG_LTO_CLANG_FULL is not set' >> "$OUT/.config" ;;
-full) printf '%s\n' 'CONFIG_CFI_CLANG=y' 'CONFIG_LTO_CLANG=y' 'CONFIG_LTO_CLANG_FULL=y' >> "$OUT/.config" ;;
+off)  printf '%s\n' '# CONFIG_CFI_CLANG is not set' >> "$OUT/.config" ;;
+thin|full) printf '%s\n' 'CONFIG_CFI_CLANG=y' >> "$OUT/.config" ;;
 *) echo "ERROR: bad K60_CFI_MODE=$K60_CFI_MODE (use off|thin|full)"; exit 1 ;;
+esac
+
+case "$K60_LTO" in
+none) printf '%s\n' '# CONFIG_LTO_CLANG is not set' '# CONFIG_LTO_CLANG_THIN is not set' '# CONFIG_LTO_CLANG_FULL is not set' >> "$OUT/.config" ;;
+thin) printf '%s\n' 'CONFIG_LTO_CLANG=y' 'CONFIG_LTO_CLANG_THIN=y' '# CONFIG_LTO_CLANG_FULL is not set' >> "$OUT/.config" ;;
+full) printf '%s\n' 'CONFIG_LTO_CLANG=y' 'CONFIG_LTO_CLANG_FULL=y' >> "$OUT/.config" ;;
+*) echo "ERROR: bad K60_LTO=$K60_LTO (use none|thin|full)"; exit 1 ;;
 esac
 
 echo "==> olddefconfig"
@@ -129,19 +148,23 @@ else
 	echo "  ok   CONFIG_KSU_MANUAL_HOOK is not set"
 fi
 
-# The assembler encoding of __emit_inst() must agree with LLVM_IAS. See the fragment:
-# with LLVM_IAS=1 the tree needs the `.inst` form, i.e. CONFIG_BROKEN_GAS_INST unset.
-# A mismatch surfaces much later as "error: too many positional arguments" while
-# assembling arch/arm64/kvm/hyp/entry.S, so check it up front instead.
-if [ "$LLVM_IAS" = "1" ]; then
-	if grep -qE '^CONFIG_BROKEN_GAS_INST=y$' "$OUT/.config"; then
-		echo "  FAIL CONFIG_BROKEN_GAS_INST=y while LLVM_IAS=1"
-		echo "       -> __emit_inst() would use the .long form, which the integrated"
-		echo "          assembler cannot parse (arch/arm64/kvm/hyp/entry.S will fail)"
+# The assembler encoding of __emit_inst() must agree with the assembler in use.
+# CONFIG_BROKEN_GAS_INST is auto-derived (def_bool, no prompt) so it cannot be pinned from
+# a fragment - instead assert that the combination we asked for is self-consistent.
+# LTO forces the integrated assembler, which is incompatible with the .long form that a
+# "broken GAS" verdict selects; that mismatch aborts in arch/arm64/kvm/hyp/entry.S.
+if grep -qE '^CONFIG_LTO_CLANG=y$' "$OUT/.config"; then
+	echo "  note LTO is enabled -> integrated assembler required"
+	if [ "$LLVM_IAS" != "1" ]; then
+		echo "  FAIL LTO enabled but LLVM_IAS=$LLVM_IAS (must be 1)"
 		fail=1
-	else
-		echo "  ok   CONFIG_BROKEN_GAS_INST unset (matches LLVM_IAS=1)"
 	fi
+	if grep -qE '^CONFIG_BROKEN_GAS_INST=y$' "$OUT/.config"; then
+		echo "  FAIL LTO + CONFIG_BROKEN_GAS_INST=y -> kvm hyp assembly will not assemble"
+		fail=1
+	fi
+else
+	echo "  ok   LTO disabled (matches LLVM_IAS=$LLVM_IAS, .long encoding is consistent)"
 fi
 
 if [ "$K60_CFI_MODE" = off ]; then
