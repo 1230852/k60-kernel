@@ -156,7 +156,6 @@ jobs:
         env:
           K60_CFI_MODE: ${{ github.event.inputs.cfi_mode || 'off' }}
           JOBS: '4'
-          K60_VERBOSE: '1'
         run: |
           bash scripts/build-kernel.sh kernel
 
