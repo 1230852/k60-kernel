@@ -45,9 +45,15 @@ export HOSTCC="${HOSTCC:-clang}"
 export HOSTCXX="${HOSTCXX:-clang++}"
 export HOSTLD="${HOSTLD:-ld.lld}"
 export HOSTAR="${HOSTAR:-llvm-ar}"
-# LLVM_IAS=0: use the GCC assembler for .S files. Qualcomm 5.10 trees ship assembly that
-# the LLVM integrated assembler does not accept, so this is the safe choice.
-export LLVM_IAS="${LLVM_IAS:-0}"
+# LLVM_IAS=1 -> clang's integrated assembler.
+#
+# This MUST be 1 when LTO is enabled. With LLVM_IAS=0 the Makefile adds
+# `-no-integrated-as` (Makefile:589-591) and hands assembly to GNU as, which cannot
+# resolve the absolute expressions clang emits under LTO. The observed failure was
+# dozens of errors of the form:
+#     ../arch/arm64/kernel/entry.S:700: Error: bad or irreducible absolute expression
+# Set K60_LLVM_IAS=0 to force the old behaviour (only useful if you also disable LTO).
+export LLVM_IAS="${K60_LLVM_IAS:-1}"
 
 MK=(make -j"$JOBS" O="$OUT")
 
