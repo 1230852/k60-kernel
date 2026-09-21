@@ -123,12 +123,14 @@ jobs:
 
       - name: Integrate SukiSU-Ultra into kernel tree
         run: |
-          chmod +x scripts/*.sh
-          ./scripts/integrate-sukisu.sh kernel sukisu "${{ github.event.inputs.sukisu_branch || 'main' }}"
+          # Invoke via `bash` rather than relying on the executable bit: these files are
+          # uploaded through the GitHub Contents API, which does not preserve Unix mode
+          # bits, so `./script.sh` would fail with "Permission denied".
+          bash scripts/integrate-sukisu.sh kernel sukisu "${{ github.event.inputs.sukisu_branch || 'main' }}"
 
       - name: Integrate Baseband-guard into kernel tree
         run: |
-          ./scripts/integrate-bbg.sh kernel bbg
+          bash scripts/integrate-bbg.sh kernel bbg
 
       - name: Stage build config
         run: |
@@ -138,20 +140,20 @@ jobs:
 
       - name: Device tree pre-flight
         run: |
-          ./scripts/dts-preflight.sh kernel
+          bash scripts/dts-preflight.sh kernel
 
       - name: Build kernel
         env:
           K60_CFI_MODE: ${{ github.event.inputs.cfi_mode || 'off' }}
           JOBS: '4'
         run: |
-          ./scripts/build-kernel.sh kernel
+          bash scripts/build-kernel.sh kernel
 
       - name: Package AnyKernel3 zip
         env:
           WITH_DTB: ${{ github.event.inputs.with_dtb || '0' }}
         run: |
-          ./scripts/package-anykernel3.sh kernel
+          bash scripts/package-anykernel3.sh kernel
 
       - name: Upload kernel image
         if: always()
