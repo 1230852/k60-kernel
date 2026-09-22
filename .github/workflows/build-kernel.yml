@@ -152,6 +152,9 @@ jobs:
       - name: 克隆小米官方内核源码
         run: bash scripts/clone-kernel.sh
 
+      - name: 修复小米源码包缺失的驱动目录
+        run: bash scripts/fix-missing-dirs.sh
+
       - name: 集成 SukiSU / KPM / BBG / SUSFS
         run: bash scripts/integrate.sh
 
