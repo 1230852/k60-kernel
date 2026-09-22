@@ -11,6 +11,7 @@
 set -euo pipefail
 
 KERNEL_DIR="${KERNEL_DIR:-${GITHUB_WORKSPACE:-$PWD}/kernel}"
+WS="${GITHUB_WORKSPACE:-$PWD}"
 ENABLE_BBG="${ENABLE_BBG:-true}"
 ENABLE_SUSFS="${ENABLE_SUSFS:-false}"
 
