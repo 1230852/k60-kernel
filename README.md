@@ -206,10 +206,17 @@ su -c 'insmod /data/local/tmp/mt7601u.ko'
 
 ### 已知限制
 
-1. **susfs 默认关闭，且未在真机验证**
-   上游补丁的 `fs/notify/fdinfo.c` 一处 hunk 是针对较新 ACK 写的（用了本树不存在的
-   `inotify_mark_user_mask()`），已适配（见 `patches/README.md`），但**运行行为未验证**。
-   需要时用 `enable_susfs` 打开；异常就关掉回到干净构建。
+1. **susfs 目前无法启用（默认关闭，启用会快速失败并给出提示）** —— 已实测查清：
+   - SukiSU 的 `susfs_new` 分支只含**管理器 App 端** susfs UI，`kernel/` 里没有 susfs 实现，
+     其 `kernel/Kconfig` 也没有 `CONFIG_KSU_SUSFS`（所以不是换个分支就行）；
+   - **内核侧**补丁可用：24 文件中 23 个干净应用，剩 1 个 hunk 已由
+     `patches/susfs-fdinfo-fixup.patch` 适配并实测通过；
+   - **KernelSU 侧**补丁是拦路石：3091 行 / 28 文件中 27 个可应用，
+     但 `kernel/core/init.c` 的 3 个 hunk 需要**人工移植** ——
+     补丁面向重构前的老版 KernelSU，要重排 `kernelsu_init()/kernelsu_exit()`，
+     而 SukiSU 该文件已重写。
+   `integrate.sh` 会先 dry-run，不通过立刻停下，不浪费一次 25 分钟编译。
+   详见 `patches/README.md` 的「susfs 现状」。
 
 2. **不构建 `dtbs`**
    小米这个开源包**没有发布设备树源码**（vendor DTS 缺失），所以 DTB 沿用你 ROM 里的原厂文件。
