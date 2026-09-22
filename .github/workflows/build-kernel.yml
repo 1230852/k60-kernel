@@ -132,11 +132,18 @@ jobs:
             bc bison flex libssl-dev libelf-dev make \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             ccache zip unzip lz4 xz-utils cpio rsync python3 \
-            curl git device-tree-compiler libncurses-dev kmod
+            curl git device-tree-compiler libncurses-dev kmod shellcheck
           aarch64-linux-gnu-gcc --version | head -n 1
           arm-linux-gnueabi-gcc --version | head -n 1
           # AOSP clang-r416183b 依赖 libtinfo.so.5；新版 Ubuntu 已移除该包，装不上也不影响
           sudo apt-get install -y -qq libtinfo5 || echo "[!] libtinfo5 不可用（新发行版属正常）"
+
+      - name: shellcheck 静态检查（仅报告，不阻断构建）
+        run: |
+          # 之前出过 integrate.sh 引用未定义变量 $WS 导致 set -u 直接退出的问题，
+          # 这一步专门用来提前暴露这类错误。
+          shellcheck -S error scripts/*.sh || true
+          echo "[=] shellcheck 完成（error 级别，仅供参考）"
 
       - name: 缓存 ccache
         uses: actions/cache@v4
