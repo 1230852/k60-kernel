@@ -84,7 +84,9 @@ env:
   ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
 
   # ---- 开关（push 事件走默认值）----
-  SUKISU_REF: ${{ (github.event.inputs.enable_susfs == 'true') && 'susfs_new' || (github.event.inputs.ksu_ref || 'v4.2.0') }}
+  # 注意：SukiSU 的 susfs_new 分支只含管理器 App 端 susfs UI，kernel/ 内没有 susfs 实现，
+  # 所以开启 susfs 不需要（也不应该）切换分支。susfs 的内核侧支持靠打补丁，见 integrate.sh。
+  SUKISU_REF: ${{ github.event.inputs.ksu_ref || 'v4.2.0' }}
   ENABLE_BBG: ${{ github.event.inputs.enable_bbg || 'true' }}
   ENABLE_KPM: ${{ github.event.inputs.enable_kpm || 'true' }}
   ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs || 'false' }}
