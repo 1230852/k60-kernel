@@ -174,7 +174,7 @@ done <<< "$CHECKS"
 [ -n "$missing" ] && FAILED=1
 
 # 必须为"关闭"的调试项：GKI 基线默认开着，会把内核变慢并在 UB 时直接 panic
-for sym in CONFIG_KASAN CONFIG_KASAN_HW_TAGS CONFIG_KFENCE CONFIG_UBSAN CONFIG_UBSAN_TRAP; do
+for sym in CONFIG_KASAN CONFIG_KASAN_HW_TAGS CONFIG_KFENCE CONFIG_UBSAN CONFIG_UBSAN_TRAP CONFIG_GPIO_TESTING_MODE; do
   if grep -q "^${sym}=" "$CFG"; then
     printf '  [FAIL] %-32s 应为关闭，实际已开启\n' "$sym"
     missing="$missing $sym"
