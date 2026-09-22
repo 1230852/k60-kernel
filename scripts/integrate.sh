@@ -158,9 +158,33 @@ if [ "$ENABLE_SUSFS" = "true" ]; then
 
   KSU_PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
   if [ -f "$KSU_PATCH" ]; then
-    ( cd KernelSU && patch -p1 --forward --no-backup-if-mismatch < "../$KSU_PATCH" ) \
-      || die "SUSFS 的 KernelSU 侧补丁应用失败"
-    echo "[+] KernelSU 侧 susfs 补丁已应用"
+    # 先干跑再决定。实测结论（见 patches/README.md）：
+    # susfs4ksu 这个补丁是针对**较早版本**的 KernelSU 写的。对 SukiSU 当前 main：
+    #   28 个文件中 27 个可应用（25 hunk 干净 + 2 个带 fuzz），
+    #   只有 kernel/core/init.c 的 3 个 hunk 失败 —— 因为该文件已被重构，
+    #   补丁里对 kernelsu_init()/kernelsu_exit() 的大段改写无法机械套用。
+    if ( cd KernelSU && patch -p1 --dry-run --forward < "../$KSU_PATCH" ) > /tmp/ksu-susfs-dry.log 2>&1; then
+      ( cd KernelSU && patch -p1 --forward --no-backup-if-mismatch < "../$KSU_PATCH" ) \
+        || die "susfs 的 KernelSU 侧补丁应用失败"
+      echo "[+] KernelSU 侧 susfs 补丁已应用"
+    else
+      echo "     ---- 补丁与当前 SukiSU 的差异（前 20 行）----"
+      head -n 20 /tmp/ksu-susfs-dry.log | sed 's/^/       /'
+      die "susfs 的 KernelSU 侧补丁无法完整应用（这是已知限制，不是你操作错了）。
+
+      实测结论：
+        * susfs4ksu 的 10_enable_susfs_for_ksu.patch 面向较早版本的 KernelSU；
+        * SukiSU 的 kernel/core/init.c 已重构，kernelsu_init()/kernelsu_exit() 的
+          初始化顺序完全不同；
+        * 该文件 3 个 hunk 需要人工移植（其余 27 个文件都能应用）。
+        * 另外注意：SukiSU 的 susfs_new 分支只含**管理器 App 端** susfs UI，
+          kernel/ 里没有任何 susfs 实现，所以也不是换个分支就能解决。
+
+      你的选择：
+        (1) 关闭 enable_susfs，用默认配置构建 —— 这条路径已实测可编译、可刷机；
+        (2) 自己把 susfs_init() 及 susfs 相关调用移植进当前 SukiSU 的 init 流程。
+      详见仓库 patches/README.md 的『susfs 现状』一节。"
+    fi
   fi
 else
   log "3/4 跳过 SUSFS（ENABLE_SUSFS=false）"
