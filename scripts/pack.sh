@@ -19,6 +19,10 @@ ANYKERNEL_REPO="${ANYKERNEL_REPO:-https://github.com/osm0sis/AnyKernel3.git}"
 log() { printf '\n\033[1;36m==== %s ====\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31m[ERROR] %s\033[0m\n' "$*" >&2; exit 1; }
 
+for t in git zip; do
+  command -v "$t" >/dev/null 2>&1 || die "缺少命令 '$t'（CI 上由 apt 安装 zip）"
+done
+
 mkdir -p "$WS/work"
 STAGE="$WS/work/ak3"
 rm -rf "$STAGE"
