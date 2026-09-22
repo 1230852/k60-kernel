@@ -50,6 +50,8 @@ append_fragment() {
 # ---------------------------------------------------------------------------
 log "3/5 追加本项目片段"
 append_fragment "SukiSU Ultra + BBG" "$WS/configs/k60-sukisu-bbg.config"
+# 关闭 GKI 调试特性（KASAN/UBSAN_TRAP/KFENCE），否则内核又慢又会随机 panic
+append_fragment "日常可用性基线" "$WS/configs/k60-base.config"
 
 if [ "$ENABLE_EXTRAS" = "true" ]; then
   append_fragment "网络增强驱动补齐" "$WS/configs/k60-extras.config"
@@ -151,6 +153,7 @@ CONFIG_CFG80211=m
 CONFIG_MAC80211=m
 CONFIG_R8188EU=m
 CONFIG_RTL8XXXU=m
+CONFIG_RT2X00=m
 CONFIG_RT2800USB=m
 CONFIG_ATH9K_HTC=m
 CONFIG_MT7601U=m"; fi
@@ -169,6 +172,17 @@ while IFS='=' read -r sym want; do
 done <<< "$CHECKS"
 
 [ -n "$missing" ] && FAILED=1
+
+# 必须为"关闭"的调试项：GKI 基线默认开着，会把内核变慢并在 UB 时直接 panic
+for sym in CONFIG_KASAN CONFIG_KASAN_HW_TAGS CONFIG_KFENCE CONFIG_UBSAN CONFIG_UBSAN_TRAP; do
+  if grep -q "^${sym}=" "$CFG"; then
+    printf '  [FAIL] %-32s 应为关闭，实际已开启\n' "$sym"
+    missing="$missing $sym"
+    FAILED=1
+  else
+    printf '  [OK]   %-32s 已关闭\n' "$sym"
+  fi
+done
 
 if [ "$ENABLE_BBG" = "true" ]; then
   if grep -m1 '^CONFIG_LSM=' "$CFG" | grep -q 'baseband_guard'; then
