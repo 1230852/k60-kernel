@@ -1,0 +1,232 @@
+name: 编译红米K60内核 (SukiSU+KPM+BBG)
+
+# ============================================================================
+#  红米 K60 / POCO F5 Pro (mondrian, SM8475)
+#  基于小米官方开源内核 mondrian-s-oss (Linux 5.10.81)
+#  集成：SukiSU Ultra + KPM + Baseband Guard(BBG) + 网络驱动补齐
+#  工具链：LLVM (AOSP clang-r416183b) + GCC (aarch64-linux-gnu / arm-linux-gnueabi)
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: 'SukiSU Ultra 版本 (tag / 分支 / 提交)'
+        required: true
+        default: 'v4.2.0'
+        type: string
+      enable_kpm:
+        description: '集成 KPM (KernelPatch Module 支持)'
+        type: boolean
+        default: true
+      enable_bbg:
+        description: '集成 BBG (Baseband Guard 基带防格式化保护)'
+        type: boolean
+        default: true
+      enable_susfs:
+        description: '集成 SUSFS (会强制改用 SukiSU 的 susfs_new 分支)'
+        type: boolean
+        default: false
+      enable_usb_wifi:
+        description: '补齐 USB 无线网卡驱动 (8188EU/8XXXU/RT2800/ATH9K_HTC/MT7601U)'
+        type: boolean
+        default: true
+      enable_88xxau:
+        description: '额外编译外置 88XXAU (RTL8812AU/8821AU) 驱动 [可选,失败不影响主产物]'
+        type: boolean
+        default: false
+      lto:
+        description: 'LTO 模式 (thin 更快 / full 与官方一致 / none 关闭 LTO+CFI)'
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+        default: thin
+      debug_info:
+        description: '保留内核调试信息 (体积巨大，CI 建议关闭)'
+        type: boolean
+        default: false
+      release_tag:
+        description: '发布 Release 的标签 (留空则只上传 Artifact)'
+        required: false
+        default: ''
+        type: string
+
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ---- 源码基线（固定提交，保证可复现）----
+  KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
+  KERNEL_BRANCH: mondrian-s-oss
+  KERNEL_SHA: 989b27aa8391a2ede9b067b53877c4c3343955fe
+
+  # ---- 工具链 ----
+  CLANG_TAG: clang-r416183b
+
+  # ---- 第三方集成 ----
+  SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+  BBG_REPO: https://github.com/vc-teahouse/Baseband-guard.git
+  BBG_SHA: a54e0dc6cf0aff4dd87fec49644a02d2eb612905
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH: gki-android12-5.10
+  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
+
+  # ---- 开关（push 事件走默认值）----
+  SUKISU_REF: ${{ (github.event.inputs.enable_susfs == 'true') && 'susfs_new' || (github.event.inputs.ksu_ref || 'v4.2.0') }}
+  ENABLE_BBG: ${{ github.event.inputs.enable_bbg || 'true' }}
+  ENABLE_KPM: ${{ github.event.inputs.enable_kpm || 'true' }}
+  ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs || 'false' }}
+  ENABLE_USB_WIFI: ${{ github.event.inputs.enable_usb_wifi || 'true' }}
+  LTO_MODE: ${{ github.event.inputs.lto || 'thin' }}
+  DEBUG_INFO: ${{ github.event.inputs.debug_info || 'false' }}
+
+jobs:
+  build:
+    name: 编译内核
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 规范化换行符并赋予执行权限
+        run: |
+          find . -name '*.sh' -exec sed -i 's/\r$//' {} +
+          find configs -name '*.config' -exec sed -i 's/\r$//' {} +
+          chmod +x scripts/*.sh
+          bash -n scripts/toolchain.sh
+          bash -n scripts/clone-kernel.sh
+          bash -n scripts/integrate.sh
+          bash -n scripts/configure.sh
+          bash -n scripts/build.sh
+          bash -n scripts/build-88xxau.sh
+          bash -n scripts/pack.sh
+          echo "[=] 脚本语法检查通过"
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          df -h /
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison flex libssl-dev libelf-dev make \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            ccache zip unzip lz4 xz-utils cpio rsync python3 \
+            curl git device-tree-compiler libncurses-dev kmod
+          aarch64-linux-gnu-gcc --version | head -n 1
+          arm-linux-gnueabi-gcc --version | head -n 1
+          # AOSP clang-r416183b 依赖 libtinfo.so.5；新版 Ubuntu 已移除该包，装不上也不影响
+          sudo apt-get install -y -qq libtinfo5 || echo "[!] libtinfo5 不可用（新发行版属正常）"
+
+      - name: 缓存 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-
+
+      - name: 准备 LLVM + GCC 工具链
+        run: bash scripts/toolchain.sh
+
+      - name: 克隆小米官方内核源码
+        run: bash scripts/clone-kernel.sh
+
+      - name: 集成 SukiSU / KPM / BBG / SUSFS
+        run: bash scripts/integrate.sh
+
+      - name: 生成内核配置（含配置闸门校验）
+        run: bash scripts/configure.sh
+
+      - name: 编译内核
+        run: bash scripts/build.sh
+
+      - name: 【可选】编译外置 88XXAU 驱动
+        if: ${{ github.event.inputs.enable_88xxau == 'true' }}
+        continue-on-error: true
+        run: bash scripts/build-88xxau.sh
+
+      - name: 打包 AnyKernel3 刷机包
+        run: bash scripts/pack.sh
+
+      - name: 上传刷机包
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-AnyKernel3
+          path: work/*.zip
+          if-no-files-found: error
+
+      - name: 上传驱动模块
+        if: ${{ hashFiles('work/modules/*.ko') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-extra-modules
+          path: work/modules/*.ko
+
+      - name: 上传内核镜像
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-Image-lz4
+          path: kernel/out/arch/arm64/boot/Image.lz4
+
+      - name: 构建结果汇总
+        if: always()
+        run: |
+          {
+            echo "## 红米 K60 (mondrian) 内核构建结果"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|---|---|"
+            echo "| 源码基线 | \`mondrian-s-oss\` (Linux 5.10.81) |"
+            echo "| SukiSU Ultra | \`$SUKISU_REF\` |"
+            echo "| KPM | $ENABLE_KPM |"
+            echo "| BBG 基带保护 | $ENABLE_BBG |"
+            echo "| SUSFS | $ENABLE_SUSFS |"
+            echo "| USB 无线网卡驱动 | $ENABLE_USB_WIFI |"
+            echo "| LTO | $LTO_MODE |"
+            echo "| 调试信息 | $DEBUG_INFO |"
+            if [ -f kernel/out/include/generated/utsrelease.h ]; then
+              echo "| 内核版本串 | \`$(sed -n 's/^#define UTS_RELEASE "\(.*\)"$/\1/p' kernel/out/include/generated/utsrelease.h)\` |"
+            fi
+            if [ -f kernel/out/.config ]; then
+              echo ""
+              echo "### 关键配置"
+              echo '```'
+              grep -E '^CONFIG_(KSU|KPM|BBG|KSU_SUSFS|LTO_CLANG\w*|CFI_CLANG|LSM|TCP_CONG_BBR|R8188EU|RTL8XXXU|RT2800USB|ATH9K_HTC|MT7601U|MODVERSIONS|MODULE_UNLOAD|PREEMPT)=' kernel/out/.config || true
+              echo '```'
+            fi
+            echo ""
+            echo "### 产物"
+            echo '```'
+            ls -lh work/ 2>/dev/null || echo "(无)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 发布 Release
+        if: ${{ github.event.inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: ${{ github.event.inputs.release_tag }}
+          files: work/*.zip
+          generate_release_notes: true

@@ -1,0 +1,8 @@
+kernel/
+toolchain/
+work/
+out/
+*.zip
+*.img
+*.ko
+*.tar.gz
