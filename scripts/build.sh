@@ -33,12 +33,31 @@ ccache --show-stats || true
 
 cd "$KERNEL_DIR"
 
-MAKE=(make -j"$(nproc)" O="$OUT" ARCH=arm64 CC="ccache clang")
+MAKE=(make -j"$(nproc)" -k O="$OUT" ARCH=arm64 CC="ccache clang")
 
-log "编译内核（$(nproc) 线程，LTO/CFI 已按配置启用）"
+log "编译内核（$(nproc) 线程，-k 模式：出错继续，一次性收集全部错误）"
 echo "[=] clang: $(clang --version | head -n 1)"
 echo "[=] 开始时间: $(date -u '+%F %T UTC')"
-time "${MAKE[@]}" Image.lz4
+
+BUILD_LOG=/tmp/kernel-build.log
+set +e
+time "${MAKE[@]}" Image.lz4 2>&1 | tee "$BUILD_LOG"
+BUILD_RC=${PIPESTATUS[0]}
+set -e
+
+if [ "$BUILD_RC" -ne 0 ]; then
+  mkdir -p "$WS/work"
+  cp -f "$BUILD_LOG" "$WS/work/kernel-build.log" 2>/dev/null || true
+  echo
+  echo "=========================================================="
+  echo " 编译失败 —— -k 模式已尽可能收集所有错误（去重后列出）"
+  echo "=========================================================="
+  grep -aE 'error:|fatal error:|Error [0-9]+|No rule to make target|undefined reference' "$BUILD_LOG" \
+    | sed 's/^\.\.\///; s/^ *//' | sort -u | head -120
+  echo "=========================================================="
+  echo " 完整日志已保存: $BUILD_LOG （并复制到 work/kernel-build.log 供 artifact 上传）"
+  exit 1
+fi
 
 IMG="$OUT/arch/arm64/boot/Image.lz4"
 [ -f "$IMG" ] || { echo "[-] 未生成 $IMG" >&2; exit 1; }
