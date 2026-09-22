@@ -192,6 +192,17 @@ jobs:
           name: K60-Image-lz4
           path: kernel/out/arch/arm64/boot/Image.lz4
 
+      - name: 上传编译日志（失败时用于定位）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            work/kernel-build.log
+            kernel/out/.config
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: 构建结果汇总
         if: always()
         run: |
