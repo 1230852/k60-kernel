@@ -112,14 +112,30 @@ if [ "$ENABLE_SUSFS" = "true" ]; then
   [ -f fs/susfs.c ] || die "fs/susfs.c 拷贝失败"
   [ -f include/linux/susfs.h ] || die "include/linux/susfs.h 拷贝失败"
 
-  if git apply --check "$PATCH_FILE" 2>/dev/null; then
-    git apply "$PATCH_FILE"
-    echo "[+] 内核侧补丁已应用（git apply，无 fuzz）"
-  elif patch -p1 --forward --no-backup-if-mismatch < "$PATCH_FILE"; then
-    echo "[!] 内核侧补丁已应用（patch，可能有 fuzz，请留意上方 hunk 提示）"
-  else
-    die "SUSFS 内核补丁应用失败：小米源码与 susfs 基线存在差异，需要人工 rebase"
+  # 主补丁：本树 fs/notify/fdinfo.c 有 1 个 hunk 因上游针对较新 ACK 编写而失败
+  # （上游打印 ignored_mask:0 并用 inotify_mark_user_mask()，我们 5.10.81 树是旧写法）。
+  # 该 hunk 由 patches/susfs-fdinfo-fixup.patch 用本树的真实上下文补齐。
+  patch -p1 --forward --no-backup-if-mismatch < "$PATCH_FILE" > /tmp/susfs-main.log 2>&1 || true
+  grep -E 'FAILED|Reversed|malformed|can.t find file' /tmp/susfs-main.log | sed 's/^/      /' || true
+
+  FIXUP="$WS/patches/susfs-fdinfo-fixup.patch"
+  if [ -f "$FIXUP" ]; then
+    if patch -p1 --forward --no-backup-if-mismatch < "$FIXUP"; then
+      echo "[+] fdinfo.c 上下文适配补丁已应用"
+    else
+      die "susfs 的 fdinfo.c 适配补丁应用失败（上游补丁结构可能已变）"
+    fi
   fi
+
+  # 判定标准：除已被适配补丁覆盖的 fdinfo.c 外，不允许任何未解决的 hunk
+  UNRESOLVED="$(find . -name '*.rej' -not -path './.git/*' | grep -v '^\./fs/notify/fdinfo\.c\.rej$' || true)"
+  if [ -n "$UNRESOLVED" ]; then
+    echo "$UNRESOLVED" | sed 's/^/      /'
+    die "SUSFS 补丁存在未应用的 hunk，需要人工 rebase（见上方 FAILED 列表）"
+  fi
+  find . -name '*.rej' -not -path './.git/*' -delete
+  find . -name '*.orig' -not -path './.git/*' -delete
+  echo "[+] susfs 内核侧补丁完成（含 1 处已适配的上下文差异）"
 
   KSU_PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
   if [ -f "$KSU_PATCH" ]; then
