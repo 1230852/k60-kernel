@@ -53,11 +53,11 @@ on:
         default: ''
         type: string
 
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+  # 刻意不设 push 触发器。
+  # 原因：本仓库的文件是通过 GitHub Contents API 推送的（本机 git 协议被网络阻断），
+  # 一个文件 = 一个 commit = 一次全量内核编译。实测推 3 个文件就会并发起 4 个运行，
+  # 在 4 核 runner 上互相抢占，浪费 Actions 额度。
+  # 因此编译一律通过 workflow_dispatch 显式触发。
 
 permissions:
   contents: write
