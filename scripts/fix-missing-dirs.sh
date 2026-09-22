@@ -97,4 +97,25 @@ done < <(grep -rEn '^[[:space:]]*obj-[^=]*\+=[[:space:]]*[A-Za-z0-9_./-]+/[[:spa
            --include='Makefile*' . 2>/dev/null | sed 's|^\./||')
 [ "$BAD" -eq 0 ] && echo "[=] 所有被递归引用的目录均存在"
 
+# 关键告警：列出 include 了占位头文件的源码。
+# 这些文件的实现代码在缺失目录里，若其配置项为 =y 内建，编译时必然报
+# implicit declaration 而中断（gpio-testing-mode.c 就是这样被发现的）。
+log "检查占位头文件的消费者（这类文件需要把对应配置关掉）"
+CONSUMERS=0
+while IFS= read -r src; do
+  [ -n "$src" ] || continue
+  base="$(basename "$(dirname "$src")")"
+  hits="$(grep -rlE "include.*${base}[.]h" --include='*.c' --include='*.h' . 2>/dev/null | grep -v "^./$(dirname "$src")/" || true)"
+  if [ -n "$hits" ]; then
+    CONSUMERS=1
+    echo "  [!] '$base' 的头文件被以下文件引用："
+    printf '%s\n' "$hits" | sed 's/^/        /'
+  fi
+done < "$MISSING"
+if [ "$CONSUMERS" -eq 0 ]; then
+  echo "  [=] 无消费者，占位头文件不会被编译"
+else
+  echo "  [!] 请确认上述文件对应的 CONFIG 已关闭（否则编译会中断）"
+fi
+
 echo "[+] 修复完成"
