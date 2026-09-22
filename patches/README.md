@@ -42,3 +42,57 @@
 如果 `susfs4ksu` 更新了 5.10 分支、`fdinfo.c` 那个 hunk 本身修好了，
 本补丁会因为找不到目标上下文而应用失败。届时删掉本文件即可
 （`scripts/integrate.sh` 会因适配补丁失败而明确报错，不会静默产出半成品）。
+
+---
+
+## susfs 现状（实测结论，2026-09）
+
+**结论：susfs 目前无法启用，默认关闭。启用会快速失败并给出明确提示。**
+
+已经查清的三件事：
+
+### 1. SukiSU 的 `susfs_new` 分支不是"内核带 susfs 的分支"
+
+拉取该分支的文件树后发现，susfs 相关文件**全部在管理器 App 端**：
+
+```
+manager/app/src/main/java/com/sukisu/ultra/ui/screen/susfs/...   ← 只有 Kotlin UI
+kernel/                                                          ← 无任何 susfs 文件
+```
+
+它的 `kernel/Kconfig` 里也**没有** `CONFIG_KSU_SUSFS`。所以"开 susfs 就换这个分支"是行不通的，
+`integrate.sh` 已去掉这个自动切换。
+
+### 2. 内核侧补丁可用
+
+`50_add_susfs_in_gki-android12-5.10.patch`：24 个文件中 23 个干净应用，
+仅 `fs/notify/fdinfo.c` 1 个 hunk 需要适配（已由本目录的 `susfs-fdinfo-fixup.patch` 解决，实测通过）。
+
+### 3. KernelSU 侧补丁需要人工移植（这是真正的拦路石）
+
+`kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch`（3091 行 / 28 个文件）在 SukiSU 当前 `main` 上：
+
+| 结果 | 数量 |
+|---|---|
+| 干净应用的 hunk | 25 |
+| 带 fuzz 成功 | 2 |
+| **失败** | **3 —— 全部集中在 `kernel/core/init.c`** |
+
+失败的不是上下文偏移，而是**补丁面向重构前的老版 KernelSU**：它要大段删除/重排
+`kernelsu_init()` 与 `kernelsu_exit()`（`ksu_syscall_hook_manager_init`、`ksu_late_loaded`
+分支、`ksu_init_symbol_resolver()` 等），而 SukiSU 的 `init.c` 已经重写过（250 行，
+初始化顺序完全不同）。这属于**移植**，不是补丁适配。
+
+`CONFIG_KSU_SUSFS` 系列配置项正是由这个补丁加到 `kernel/Kconfig` 里的
+（所以两个分支原本都没有它）。
+
+### 想启用 susfs 需要做什么
+
+1. 以 `kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch` 为参考，
+   把 `susfs_init()` 等调用按 **SukiSU 当前的** `kernelsu_init()` 顺序手工插入
+2. 补丁对其余 27 个文件的改动可以照用（`patch -p1 --forward` 即可）
+3. 完成后把结果做成 `patches/01-...patch`，`integrate.sh` 会按序自动应用
+
+`integrate.sh` 在启用 susfs 时会先对 KernelSU 侧补丁做 dry-run，
+不通过就立刻停下并打印以上结论，**不会浪费一次 25 分钟的编译**。
+
