@@ -47,6 +47,24 @@ insert_before_last_endmenu() {
 cd "$KERNEL_DIR"
 
 # ---------------------------------------------------------------------------
+# 本树兼容性补丁：小米发布包自身的源码矛盾（与 SukiSU/BBG 无关）
+log "0/4 应用本树兼容性补丁"
+shopt -s nullglob
+COMPAT_PATCHES=("$WS"/patches/[0-9][0-9]-*.patch)
+shopt -u nullglob
+if [ "${#COMPAT_PATCHES[@]}" -eq 0 ]; then
+  echo "[=] 无兼容性补丁"
+else
+  for p in "${COMPAT_PATCHES[@]}"; do
+    if patch -p1 --forward --no-backup-if-mismatch < "$p"; then
+      echo "[+] $(basename "$p")"
+    else
+      die "兼容性补丁应用失败: $(basename "$p")"
+    fi
+  done
+fi
+
+# ---------------------------------------------------------------------------
 log "1/4 集成 SukiSU Ultra（ref=$SUKISU_REF）"
 rm -rf KernelSU
 if ! git clone --depth 1 --branch "$SUKISU_REF" "$SUKISU_REPO" KernelSU 2>/dev/null; then
