@@ -187,7 +187,47 @@ su -c 'insmod /data/local/tmp/mt7601u.ko'
 
 ---
 
-## 八、致谢
+## 八、验证记录与已知限制
+
+以下结论均为**实测得出**（本地对真实源码做补丁试运行、在 CI 上实跑），不是推测。
+
+### 已实测验证
+
+| 项目 | 结论 |
+|---|---|
+| 配置片段符号有效性 | 全部 `CONFIG_` 符号逐个对照源码 Kconfig 核实，**零无效符号** |
+| SukiSU / KPM / BBG 生效 | CI 配置闸门实测：`CONFIG_KSU=y`、`CONFIG_KPM=y`、`CONFIG_BBG=y`、`CONFIG_LSM` 含 `baseband_guard` 全部通过 |
+| 厂商模块可加载性 | 守住 `MODVERSIONS/MODULE_UNLOAD/PREEMPT`（`same_magic()` 只比 flag 段），厂商模块不受内核版本差异影响 |
+| 工具链 | AOSP `clang-r416183b` 顺利编过 `arch/arm64/kernel/entry.S`（Ubuntu clang-14 在此处必挂） |
+| 缺失驱动目录修复 | `drivers/misc/hwid`、`drivers/misc/plaid` 占位修复在 CI 实测通过 |
+| AnyKernel3 打包 | 本地实跑 `pack.sh`，staging 结构（`Image.lz4` / `anykernel.sh` / `META-INF` / `tools/magiskboot` / `k60-modules`）全部正确 |
+| susfs 补丁可应用性 | 24 文件中 23 个干净应用；剩余 1 个 hunk 已用 `patches/susfs-fdinfo-fixup.patch` 适配并**实测干净应用** |
+| workflow 语法 | YAML 解析 + 7 个 shell 脚本 `bash -n` 全部通过 |
+
+### 已知限制
+
+1. **susfs 默认关闭，且未在真机验证**
+   上游补丁的 `fs/notify/fdinfo.c` 一处 hunk 是针对较新 ACK 写的（用了本树不存在的
+   `inotify_mark_user_mask()`），已适配（见 `patches/README.md`），但**运行行为未验证**。
+   需要时用 `enable_susfs` 打开；异常就关掉回到干净构建。
+
+2. **不构建 `dtbs`**
+   小米这个开源包**没有发布设备树源码**（vendor DTS 缺失），所以 DTB 沿用你 ROM 里的原厂文件。
+   好在 AnyKernel3 只替换 boot.img 里的内核，不动 DTB。
+
+3. **额外 USB 网卡驱动需手动 `insmod`**
+   它们在 `vendor_dlkm` 之外，Android 的 `modules.load` 里没有，不会自动加载。做法见上文第六节。
+
+4. **`hwid` / `plaid` 两个驱动源码缺失**
+   小米未发布。`hwid.ko` 是手机 `vendor_dlkm` 里的预编译模块（`modules.list.msm.mondrian` 第 100 行），
+   由它导出 `get_hw_country_version()` 给 `cnss2.ko`(WiFi) 使用，因此**不影响 WiFi**。
+   与之相关的内核内建消费者 `gpio-testing-mode`（小米工厂测试驱动）已关闭。
+
+5. **不做 KMI 符号裁剪**，`android/abi_gki_aarch64*.xml` 一个字节都没改。
+
+---
+
+## 九、致谢
 
 - [SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra) —— 内核级 root 与 KPM
 - [Baseband-guard](https://github.com/vc-teahouse/Baseband-guard) —— 基带保护 LSM
