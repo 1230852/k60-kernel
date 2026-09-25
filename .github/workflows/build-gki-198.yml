@@ -1,0 +1,258 @@
+name: Build K60 GKI 5.10.198 SukiSU-Ultra + BBG
+
+# 自己编译: GKI android12-5.10 (+2023-11 SPL) 源码树
+#   -> 打 Baseband-guard 补丁
+#   -> 集成 SukiSU-Ultra (drivers/kernelsu)
+#   -> LTO=thin, AOSP 预编译 clang (r416183b / 12.0.5)
+#   -> 产出 Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      spl:
+        description: '安全补丁分支 (对应机器的 os_version)'
+        required: false
+        default: '2023-11'
+      root_flavor:
+        description: 'root 方案仓库 URL'
+        required: false
+        default: 'https://github.com/SukiSU-Ultra/SukiSU-Ultra.git'
+  push:
+    branches: [ gki198 ]
+
+concurrency:
+  group: gki198-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      # ---------------------------------------------------------- 腾磁盘 --
+      - name: Free disk space
+        run: |
+          set -x
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+                      /usr/local/lib/node_modules /usr/share/swift || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git curl python3 python3-pip jq zip unzip cpio rsync \
+            bc flex bison libssl-dev libelf-dev libncurses-dev \
+            dwarves swig kmod
+
+      - name: Install repo tool
+        run: |
+          set -eux
+          mkdir -p "$HOME/bin"
+          curl -fsSL --retry 5 --retry-delay 5 \
+            https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/repo" --version
+
+      # -------------------------------------------------- 同步 GKI 源码 --
+      - name: Sync GKI kernel source
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -eux
+          git config --global user.name  "k60-ci"
+          git config --global user.email "k60-ci@users.noreply.github.com"
+          git config --global http.postBuffer 524288000
+
+          SPL="${{ github.event.inputs.spl }}"
+          [ -z "$SPL" ] && SPL="2023-11"
+          BR="android12-5.10-${SPL}"
+          echo "目标分支: common-${BR}"
+
+          mkdir -p kernel
+          cd kernel
+
+          # 主尝试: 带 SPL 的 manifest 分支
+          if ! repo init --depth=1 --partial-clone --no-clone-bundle \
+                 -u https://android.googlesource.com/kernel/manifest -b "common-${BR}" 2>&1 | tail -5; then
+            echo "!! common-${BR} 不可用, 回退到 common-android12-5.10"
+            rm -rf .repo
+            repo init --depth=1 --partial-clone --no-clone-bundle \
+              -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10
+            FALLBACK=1
+          fi
+
+          timeout 40m repo sync -c --current-branch --no-clone-bundle \
+              --jobs-checkout=4 -j4 || {
+            echo "sync 失败, 重试一次"; sleep 10
+            timeout 40m repo sync -c --current-branch --no-clone-bundle \
+              --jobs-checkout=4 -j4
+          }
+
+          test -d common || { echo "!! 没有 common/ 目录"; exit 1; }
+          test -f build/build.sh || { echo "!! 没有 build/build.sh"; exit 1; }
+
+          # 回退时手动切到目标 SPL
+          if [ "${FALLBACK:-0}" = "1" ]; then
+            echo "手动切到 ${BR}"
+            git -C common fetch --depth=1 origin "${BR}" || true
+            git -C common checkout FETCH_HEAD || git -C common checkout "${BR}"
+          fi
+
+          echo "=== 内核版本号 ==="
+          head -5 common/Makefile
+          echo "=== clang ==="
+          ls prebuilts/clang/host/linux-x86/ 2>/dev/null || echo "(clang 目录暂未出现)"
+
+      # ----------------------------------------------- 打 Baseband-guard --
+      - name: Apply Baseband-guard
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -eux
+          curl -fsSL --retry 5 --retry-delay 5 \
+            https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash
+
+          # 把 baseband_guard 加进 CONFIG_LSM 的默认值
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' \
+            common/security/Kconfig
+
+          grep -n "baseband_guard" common/security/Kconfig
+          echo "BBG 目录:"; ls -d Baseband-guard 2>/dev/null || true
+          echo "security 目录里新增的东西:"
+          ls common/security/ | head -40
+
+      # --------------------------------------------- 集成 SukiSU-Ultra --
+      - name: Integrate SukiSU-Ultra
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -eux
+          ROOT_REPO="${{ github.event.inputs.root_flavor }}"
+          [ -z "$ROOT_REPO" ] && ROOT_REPO="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
+
+          if   [ -d common/drivers ]; then DRIVERS="common/drivers"
+          elif [ -d drivers ];       then DRIVERS="drivers"
+          else echo "!! 找不到 drivers 目录"; exit 1; fi
+          echo "drivers 目录: $DRIVERS"
+
+          rm -rf SukiSU-Ultra
+          git clone --depth=1 "$ROOT_REPO" SukiSU-Ultra
+          git -C SukiSU-Ultra log -1 --oneline
+
+          test -f SukiSU-Ultra/kernel/Kconfig || { echo "!! 仓库里没有 kernel/Kconfig"; exit 1; }
+          test -f SukiSU-Ultra/kernel/Makefile || { echo "!! 仓库里没有 kernel/Makefile"; exit 1; }
+
+          REL="$(realpath --relative-to="$DRIVERS" "$PWD/SukiSU-Ultra/kernel")"
+          echo "符号链接: $DRIVERS/kernelsu -> $REL"
+          ln -sfn "$REL" "$DRIVERS/kernelsu"
+
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' "$DRIVERS/Makefile" \
+            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVERS/Makefile"
+          grep -q 'drivers/kernelsu/Kconfig' "$DRIVERS/Kconfig" \
+            || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' "$DRIVERS/Kconfig"
+
+          ls -l "$DRIVERS/kernelsu"
+          echo "=== Makefile 尾部 ==="; tail -3 "$DRIVERS/Makefile"
+          echo "=== Kconfig 里的 kernelsu ==="; grep -n kernelsu "$DRIVERS/Kconfig"
+          echo "=== SukiSU-Ultra 版本 ==="
+          grep -rn "KSU_VERSION" SukiSU-Ultra/kernel/Makefile 2>/dev/null | head -3 || true
+
+      # ------------------------------------------------------ 改配置 -----
+      - name: Patch gki_defconfig
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -eux
+          D=arch/arm64/configs/gki_defconfig
+          test -f "$D"
+          cp "$D" /tmp/gki_defconfig.orig
+
+          apply() {
+            local key="$1" val="$2"
+            if grep -q "^${key}=" "$D"; then
+              sed -i "s|^${key}=.*|${key}=${val}|g" "$D"
+            elif grep -q "^# ${key} is not set" "$D"; then
+              sed -i "s|^# ${key} is not set|${key}=${val}|g" "$D"
+            else
+              echo "${key}=${val}" >> "$D"
+            fi
+          }
+
+          apply CONFIG_KSU y
+          apply CONFIG_BBG y
+          apply CONFIG_KPROBES y
+
+          echo "=== 改动 ==="
+          diff /tmp/gki_defconfig.orig "$D" || true
+
+      # -------------------------------------------------------- 编译 -----
+      - name: Build kernel
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -eux
+          sed -i 's/check_defconfig//' ./common/build.config.gki
+          echo "--- build.config.gki ---"; cat ./common/build.config.gki
+          echo "--- 预编译 clang ---"
+          ls prebuilts/clang/host/linux-x86/ || true
+
+          export OUT_DIR="$GITHUB_WORKSPACE/out"
+          export DIST_DIR="$GITHUB_WORKSPACE/out/dist"
+
+          BUILD_GKI_ARTIFACTS="" \
+          BUILD_GKI_CERTIFICATION_TOOLS=0 \
+          BUILD_SYSTEM_DLKM=0 \
+          SKIP_VENDOR_BOOT=1 \
+          SKIP_EXT_MODULES=1 \
+          SKIP_CP_KERNEL_HDR=1 \
+          OUT_DIR="$OUT_DIR" \
+          DIST_DIR="$DIST_DIR" \
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+          build/build.sh -j"$(nproc)"
+
+      # ------------------------------------------------------ 收集产物 ---
+      - name: Gather and verify Image
+        run: |
+          set -eux
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          FOUND=""
+          for f in "$GITHUB_WORKSPACE/out/dist/Image" \
+                   "$GITHUB_WORKSPACE/out/common/arch/arm64/boot/Image" \
+                   "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image"; do
+            if [ -f "$f" ]; then FOUND="$f"; break; fi
+          done
+          [ -n "$FOUND" ] || { echo "!! 没找到 Image"; find "$GITHUB_WORKSPACE/out" -name 'Image*' -maxdepth 6 | head -20; exit 1; }
+          echo "找到: $FOUND"
+          cp "$FOUND" "$GITHUB_WORKSPACE/artifact/Image"
+          cd "$GITHUB_WORKSPACE/artifact"
+          ls -l Image
+          echo "=========== 版本 ==========="
+          strings -a Image | grep -m2 "Linux version 5\.10" || true
+          strings -a Image | grep -m2 "SMP preempt mod_unload" || true
+          echo "=========== SukiSU ==========="
+          strings -a Image | grep -m4 -iE "sukisu|kernelsu" || echo "(未见 KSU 字样!)"
+          echo "=========== Baseband-guard ==========="
+          strings -a Image | grep -m4 "baseband_guard" || echo "(未见 BBG 字样!)"
+          echo "=========== 确认没有 waipio ==========="
+          strings -a Image | grep -m2 -i "waipio" || echo "OK: 无 waipio"
+          echo "=========== 最终配置 (KSU/BBG/LSM) ==========="
+          CFG="$GITHUB_WORKSPACE/out/common/.config"
+          [ -f "$CFG" ] || CFG="$GITHUB_WORKSPACE/out/.config"
+          if [ -f "$CFG" ]; then
+            cp "$CFG" "$GITHUB_WORKSPACE/artifact/config-final.txt"
+            grep -E "^CONFIG_(KSU|BBG|LTO|KASAN|KFENCE|UBSAN|CFI_CLANG|SHADOW_CALL_STACK|ARM64_BTI_KERNEL|MODVERSIONS|TRIM_UNUSED_KSYMS|LSM|ARCH_WAIPIO)" "$CFG" || true
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-GKI-Image-SukiSU-BBG
+          path: |
+            ${{ github.workspace }}/artifact/Image
+            ${{ github.workspace }}/artifact/config-final.txt
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
