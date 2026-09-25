@@ -70,43 +70,75 @@ jobs:
           git config --global http.postBuffer 524288000
 
           SPL="${{ github.event.inputs.spl }}"
-          [ -z "$SPL" ] && SPL="2023-11"
+          [ -n "$SPL" ] || SPL="2023-11"
           BR="android12-5.10-${SPL}"
-          echo "目标分支: common-${BR}"
+          KMI="android12-5.10"
+          MANIFEST_URL="https://android.googlesource.com/kernel/manifest"
+          COMMON_URL="https://android.googlesource.com/kernel/common"
+          echo "目标: common-${BR}"
 
           mkdir -p kernel
           cd kernel
 
-          # 主尝试: 带 SPL 的 manifest 分支
-          if ! repo init --depth=1 --partial-clone --no-clone-bundle \
-                 -u https://android.googlesource.com/kernel/manifest -b "common-${BR}" 2>&1 | tail -5; then
-            echo "!! common-${BR} 不可用, 回退到 common-android12-5.10"
+          # 注意: 不能写 "if ! repo init ... | tail -5" —— 管道的 $? 取的是 tail 的
+          # 状态, 永远为 0, 回退分支不会执行。这里用普通 if 判断。
+          try_init() {
             rm -rf .repo
             repo init --depth=1 --partial-clone --no-clone-bundle \
-              -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10
-            FALLBACK=1
+              -u "$MANIFEST_URL" -b "$1"
+          }
+
+          # android12-5.10 的 SPL 在 kernel/common 里是 **tag**(xxxx_r1) 而不是分支,
+          # 直接用 manifest 里写的 revision 去 fetch 会报:
+          #   fatal: couldn't find remote ref refs/heads/android12-5.10-2023-11
+          # 所以这里先确认该 ref 是否真的存在, 不存在就换成最新的 _r* tag。
+          fix_common_revision() {
+            local def=".repo/manifests/default.xml"
+            [ -f "$def" ] || { echo "!! 找不到 $def"; return 1; }
+            local rev
+            rev="$(sed -n 's/.*path="common"[^>]*revision="\([^"]*\)".*/\1/p' "$def" | head -1)"
+            echo "[=] manifest: common revision = ${rev:-<空>}"
+            [ -n "$rev" ] || return 1
+            if git ls-remote "$COMMON_URL" "refs/heads/$rev" 2>/dev/null | grep -q .; then
+              echo "[=] 分支 $rev 存在, 无需改动"
+              return 0
+            fi
+            echo "[=] kernel/common 没有分支 $rev, 改找 tag ${rev}_r*"
+            local tag
+            tag="$(git ls-remote --tags "$COMMON_URL" "refs/tags/${rev}_r*" 2>/dev/null \
+                  | awk '{print $2}' | grep -v '\^{}$' | sed 's|refs/tags/||' \
+                  | awk -F'_r' '{print $NF+0, $0}' | sort -n | tail -1 | cut -d' ' -f2-)"
+            if [ -n "$tag" ]; then
+              echo "[=] 使用 tag: $tag"
+              sed -i "s|revision=\"$rev\"|revision=\"$tag\"|" "$def"
+              return 0
+            fi
+            echo "!! $rev 既没有分支也没有 ${rev}_r* tag"
+            return 1
+          }
+
+          if try_init "common-$BR" && fix_common_revision; then
+            echo "[=] 使用 SPL 清单 common-$BR"
+          elif try_init "common-$KMI" && fix_common_revision; then
+            echo "[=] 回退到 KMI 清单 common-$KMI"
+          else
+            echo "!! 两种清单都不可用"; exit 1
           fi
 
-          timeout 40m repo sync -c --current-branch --no-clone-bundle \
-              --jobs-checkout=4 -j4 || {
-            echo "sync 失败, 重试一次"; sleep 10
-            timeout 40m repo sync -c --current-branch --no-clone-bundle \
+          sync_once() {
+            timeout 45m repo sync -c --current-branch --no-clone-bundle \
               --jobs-checkout=4 -j4
           }
+          sync_once || { echo "sync 失败, 10 秒后重试一次"; sleep 10; sync_once; }
 
           test -d common || { echo "!! 没有 common/ 目录"; exit 1; }
           test -f build/build.sh || { echo "!! 没有 build/build.sh"; exit 1; }
 
-          # 回退时手动切到目标 SPL
-          if [ "${FALLBACK:-0}" = "1" ]; then
-            echo "手动切到 ${BR}"
-            git -C common fetch --depth=1 origin "${BR}" || true
-            git -C common checkout FETCH_HEAD || git -C common checkout "${BR}"
-          fi
-
           echo "=== 内核版本号 ==="
           head -5 common/Makefile
-          echo "=== clang ==="
+          echo "=== common 的 ref ==="
+          git -C common log -1 --oneline || true
+          echo "=== 预编译 clang ==="
           ls prebuilts/clang/host/linux-x86/ 2>/dev/null || echo "(clang 目录暂未出现)"
 
       # ----------------------------------------------- 打 Baseband-guard --
@@ -184,9 +216,31 @@ jobs:
           apply CONFIG_KSU y
           apply CONFIG_BBG y
           apply CONFIG_KPROBES y
+          # 原机 / 可开机参考内核都是硬件 KASAN (MTE)。软件 KASAN 会预留 1/8 地址
+          # 空间的影子内存, 大改最早期内存布局 —— 是"第一屏就重启"的高度嫌疑原因。
+          apply CONFIG_KASAN y
+          apply CONFIG_KASAN_HW_TAGS y
+          apply CONFIG_ARM64_MTE y
+          apply CONFIG_LTO_CLANG_THIN y
+          apply CONFIG_LSM "lockdown,yama,loadpin,safesetid,integrity,selinux,baseband_guard,smack,tomoyo,apparmor,bpf"
+
+          # 互斥项必须显式关掉, 否则 olddefconfig 会静默回落到 KASAN_GENERIC
+          disable() {
+            local key="$1"
+            if grep -q "^# ${key} is not set" "$D"; then return; fi
+            sed -i "s|^${key}=.*|# ${key} is not set|g" "$D"
+            grep -q "^# ${key} is not set" "$D" || echo "# ${key} is not set" >> "$D"
+          }
+          disable CONFIG_KASAN_GENERIC
+          disable CONFIG_KASAN_SW_TAGS
+          disable CONFIG_LTO_CLANG_FULL
+          disable CONFIG_LTO_NONE
 
           echo "=== 改动 ==="
           diff /tmp/gki_defconfig.orig "$D" || true
+
+          echo "=== KASAN / LTO 最终值 ==="
+          grep -E '^#? ?CONFIG_(KASAN|LTO)' "$D" || true
 
       # -------------------------------------------------------- 编译 -----
       - name: Build kernel
