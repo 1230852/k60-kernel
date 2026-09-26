@@ -1,0 +1,52 @@
+--- a/kernel/sched/fie.c
++++ b/kernel/sched/fie.c
+@@ -10,6 +10,7 @@
+ #include <linux/sched/topology.h>
+ #include <linux/units.h>
+ #include <asm/arch_timer.h>
++#include <asm/sysreg.h>
+ #include <asm/cputype.h>
+ #include <asm/perf_event.h>
+ #include <trace/hooks/cpuidle.h>
+@@ -243,12 +244,18 @@
+ {
+ 	register u64 cntpct, const_cyc, cpu_cyc;
+ 
+-	asm volatile("isb\n\t"
+-		     "mrs %0, cntpct_el0\n\t"
+-		     "mrs %1, amevcntr01_el0\n\t"
+-		     "mrs %2, amevcntr00_el0\n\t"
+-		     "isb"
+-		     : "=r" (cntpct), "=r" (const_cyc), "=r" (cpu_cyc));
++	/*
++	 * clang-r416183b (clang 12) 的内联汇编寄存器表里没有 amevcntr*_el0,
++	 * 直接写寄存器名会报 "expected readable system register" 而中断编译。
++	 * 这里改用内核自带的 read_sysreg_s(): 它通过 DEFINE_MRS_S 生成的汇编宏
++	 * (mrs_s) 以 .inst 数值编码访问系统寄存器, 完全绕开寄存器名表。
++	 * arch/arm64/kernel/topology.c 读同一个 AMU 计数器用的就是这套写法。
++	 */
++	asm volatile("isb" ::: "memory");
++	asm volatile("mrs %0, cntpct_el0" : "=r" (cntpct));
++	const_cyc = read_sysreg_s(SYS_AMEVCNTR0_CONST_EL0);
++	cpu_cyc = read_sysreg_s(SYS_AMEVCNTR0_CORE_EL0);
++	asm volatile("isb" ::: "memory");
+ 
+ 	*stat = (typeof(*stat)){ cntpct, const_cyc, cpu_cyc };
+ }
+@@ -258,11 +265,11 @@
+ {
+ 	register u64 cntpct, cpu_cyc;
+ 
+-	asm volatile("isb\n\t"
+-		     "mrs %0, cntpct_el0\n\t"
+-		     "mrs %1, amevcntr00_el0\n\t"
+-		     "isb"
+-		     : "=r" (cntpct), "=r" (cpu_cyc));
++	/* 见下方 fie_amu_const_read() 的说明: 用 read_sysreg_s 代替写死的寄存器名 */
++	asm volatile("isb" ::: "memory");
++	asm volatile("mrs %0, cntpct_el0" : "=r" (cntpct));
++	cpu_cyc = read_sysreg_s(SYS_AMEVCNTR0_CORE_EL0);
++	asm volatile("isb" ::: "memory");
+ 
+ 	*stat = (typeof(*stat)){ cntpct, cntpct, cpu_cyc };
+ }

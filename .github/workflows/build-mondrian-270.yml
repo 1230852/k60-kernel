@@ -1,0 +1,355 @@
+name: 编译红米K60内核 (mondrian 社区树 5.10.270 · SukiSU+BBG)
+
+# ============================================================================
+#  红米 K60 / POCO F5 Pro (mondrian, SM8475)
+#
+#  本工作流复用 main 分支上"已被验证过"的全部脚本（scripts/ configs/
+#  anykernel/，一字未改），只把内核源码树从
+#     小米官方 mondrian-s-oss  (Linux 5.10.81)
+#  换成
+#     Kuroringo97 社区树        (Linux 5.10.270, android12-5.10, KMI gen 9)
+#
+#  ── 为什么要换树 ────────────────────────────────────────────────────────
+#  用户手机 ROM 的内核是 5.10.198-android12-9-00085-g226a9632f13d-ab111。
+#  内核加载模块时的判定逻辑（kernel/module.c）：
+#
+#      /* First part is kernel version, which we ignore if module has crcs. */
+#      static inline int same_magic(const char *amagic, const char *bmagic,
+#                                   bool has_crcs)
+#      {
+#          if (has_crcs) {                      // 模块带 __versions 段
+#              amagic += strcspn(amagic, " ");  // 跳过第一个空格前的版本号
+#              bmagic += strcspn(bmagic, " ");
+#          }
+#          return strcmp(amagic, bmagic) == 0;  // 只比后缀
+#      }
+#
+#  小米 ROM 里的 vendor 模块 vermagic 带 modversions，即有 __versions 段，
+#  所以**版本号前缀 5.10.81 / 5.10.198 / 5.10.270 根本不参与比较**。
+#  真正决定 ROM 里那些闭源 .ko 能否加载的是三件事：
+#      1) 后缀必须是 "SMP preempt mod_unload modversions aarch64"
+#      2) 导出符号的 modversions CRC 必须对得上
+#      3) CONFIG_CFI_CLANG 的类型哈希必须对得上（由 clang 版本决定）
+#  5.10.270 与 ROM 同属 android12-5.10 KMI gen 9（KMI 冻结保证 ABI 稳定），
+#  且比 5.10.81 新 189 个 stable 版本，导出符号是超集 —— 因此 ABI 上更贴近
+#  ROM，比 5.10.81 更可能让 vendor 模块正常加载。
+#
+#  ── 与 main 分支工作流的差异（仅此四处）────────────────────────────────
+#    * KERNEL_REPO / KERNEL_BRANCH / KERNEL_SHA 换成社区树
+#    * 去掉「修复小米源码包缺失的驱动目录」—— 那是官方源码包特有的缺陷
+#    * 本分支不带 patches/ 目录，integrate.sh 的兼容性补丁步骤自动跳过
+#    * 增加 push 触发器（仅限 ci-270 分支），用于在没有 Actions 写权限时
+#      通过推送事件触发编译
+#
+#  ── 保留的关键调校（这些是 main 分支 16 次迭代换来的，不要动）──────────
+#    * configs/k60-base.config 关掉 KASAN / KASAN_HW_TAGS / KFENCE /
+#      UBSAN / UBSAN_TRAP。官方 gki_defconfig 默认全开：
+#        - UBSAN_TRAP=y 会把"未定义行为"从打印告警变成**直接 panic**，
+#          日常使用会随机重启；
+#        - KASAN 与 arm64 entry 汇编冲突，实测会在 kernel_entry 宏上报
+#          "attempt to move .org backwards" 直接中断编译；
+#        - 这些都不影响 KMI / vermagic / 模块 CRC。
+#    * LTO 默认 thin：与官方 full LTO 相比内核 ABI / vermagic 完全一致，
+#      但链接更快、内存峰值更低（runner 只有 16GB）。
+#    * clang 锁定 clang-r416183b：5.10 用的是旧版 CFI（-fsanitize=cfi），
+#      该选项在 clang 16+ 已被移除，换新 clang 会直接编译失败。
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: 'SukiSU Ultra 版本 (tag / 分支 / 提交)'
+        required: true
+        default: 'v4.2.0'
+        type: string
+      enable_kpm:
+        description: '集成 KPM (KernelPatch Module 支持)'
+        type: boolean
+        default: false
+      enable_bbg:
+        description: '集成 BBG (Baseband Guard 基带防格式化保护)'
+        type: boolean
+        default: true
+      enable_susfs:
+        description: '集成 SUSFS (已知对当前 SukiSU 不可用，保持关闭)'
+        type: boolean
+        default: false
+      enable_usb_wifi:
+        description: '补齐 USB 无线网卡驱动 (社区树无对应目录时会触发配置闸门失败，首次建议关闭)'
+        type: boolean
+        default: false
+      enable_88xxau:
+        description: '额外编译外置 88XXAU 驱动 [可选,失败不影响主产物]'
+        type: boolean
+        default: false
+      lto:
+        description: 'LTO 模式 (thin 更快 / full 与官方一致 / none 关闭 LTO+CFI)'
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+        default: full
+      debug_info:
+        description: '保留内核调试信息 (体积巨大，CI 建议关闭)'
+        type: boolean
+        default: false
+      release_tag:
+        description: '发布 Release 的标签 (留空则只上传 Artifact)'
+        required: false
+        default: ''
+        type: string
+
+  # 备用触发手段：往这两个分支推提交 = 自动开跑。
+  # 之所以需要它：如果 token 只有 Contents 写权限（没有 Actions 写权限），
+  # 就无法用 API 触发 workflow_dispatch，但"推送事件"不受此限制。
+  #   * ci-270 : push-ci270.ps1 推送的目标分支
+  #   * ci-v2  : 已有的实验分支，且**没有 patches/ 目录**，
+  #              适合用浏览器网页上传（网页版建分支会继承 main 的 patches/，
+  #              那 3 个补丁是官方源码包专用的，对社区树会应用失败并 die）
+  # 推 main 不会触发本工作流。
+  push:
+    branches: [ ci-270, ci-v2 ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-270-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ---- 源码基线（社区树，固定提交保证可复现）----
+  KERNEL_REPO: https://github.com/Kuroringo97/android_kernel_xiaomi_mondrian.git
+  KERNEL_BRANCH: main
+  KERNEL_SHA: d7f86d7753f655bdc6b3980e6f8948bb217d05c3
+
+  # ---- 工具链 ----
+  CLANG_TAG: clang-r416183b
+
+  # ---- 第三方集成 ----
+  SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+  BBG_REPO: https://github.com/vc-teahouse/Baseband-guard.git
+  BBG_SHA: a54e0dc6cf0aff4dd87fec49644a02d2eb612905
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH: gki-android12-5.10
+  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
+
+  # ---- 开关 ----
+  SUKISU_REF: ${{ github.event.inputs.ksu_ref || 'v4.2.0' }}
+  ENABLE_BBG: ${{ github.event.inputs.enable_bbg || 'true' }}
+  ENABLE_KPM: ${{ github.event.inputs.enable_kpm || 'true' }}
+  ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs || 'false' }}
+  ENABLE_USB_WIFI: ${{ github.event.inputs.enable_usb_wifi || 'false' }}
+  LTO_MODE: ${{ github.event.inputs.lto || 'thin' }}
+  DEBUG_INFO: ${{ github.event.inputs.debug_info || 'false' }}
+
+jobs:
+  build:
+    name: 编译内核 (社区树 5.10.270)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 规范化换行符并赋予执行权限
+        run: |
+          find . -name '*.sh' -exec sed -i 's/\r$//' {} +
+          find configs -name '*.config' -exec sed -i 's/\r$//' {} +
+          chmod +x scripts/*.sh
+          for s in scripts/*.sh; do bash -n "$s"; done
+          echo "[=] 脚本语法检查通过"
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          df -h /
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison flex libssl-dev libelf-dev make \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            ccache zip unzip lz4 xz-utils cpio rsync python3 \
+            curl git device-tree-compiler libncurses-dev kmod shellcheck
+          aarch64-linux-gnu-gcc --version | head -n 1
+          arm-linux-gnueabi-gcc --version | head -n 1
+          sudo apt-get install -y -qq libtinfo5 || echo "[!] libtinfo5 不可用（新发行版属正常）"
+
+      - name: shellcheck 静态检查（仅报告，不阻断构建）
+        run: |
+          shellcheck -S error scripts/*.sh || true
+          echo "[=] shellcheck 完成（error 级别，仅供参考）"
+
+      - name: 缓存 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-270-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-270-
+            ccache-
+
+      - name: 准备 LLVM + GCC 工具链
+        run: bash scripts/toolchain.sh
+
+      - name: 克隆内核源码（社区树 5.10.270）
+        run: bash scripts/clone-kernel.sh
+
+      - name: 集成 SukiSU / KPM / BBG
+        run: bash scripts/integrate.sh
+
+      - name: 生成内核配置（含配置闸门校验）
+        run: bash scripts/configure.sh
+
+      - name: 编译内核
+        run: bash scripts/build.sh
+
+      # ======================================================================
+      # KernelPatch (kpimg) —— KPM 的真正实现在这里
+      #
+      # SukiSU-Ultra 仓库里的 kernel/kpm/kpm.c 是**纯桩**(7 个函数只打印
+      # "Stub function called"), 它们故意写成 noinline + NO_OPTIMIZE +
+      # EXPORT_SYMBOL, 是留给 KernelPatch 覆盖的钩子点。
+      # 真正的 KPM 引擎来自 SukiSU-Ultra/SukiSU_KernelPatch_patch
+      # (bmax121 的 KernelPatch 裁剪版), 通过 kptools 把 kpimg 追加到
+      # 内核镜像末尾, 并把内核启动入口改写到 kpimg。
+      #
+      # 这里用的命令和 superkey 与手机端管理器的 KernelFlash 功能**完全一致**:
+      #   KernelFlashState.kt:337
+      #     ./kptools -p -s 123 -i <image> -k kpimg -o oImage
+      # 所以两边可以互认。
+      # ======================================================================
+      - name: 打 KernelPatch 补丁（启用 KPM）
+        run: |
+          set -eux
+          RAW=kernel/out/arch/arm64/boot/Image
+          test -f "$RAW" || { echo "!! 找不到未压缩 Image"; exit 1; }
+          mkdir -p work
+
+          KPVER=0.13.0
+          BASE="https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/${KPVER}"
+          curl -fsSL --retry 5 --retry-delay 5 -o work/kptools-linux "$BASE/kptools-linux"
+          curl -fsSL --retry 5 --retry-delay 5 -o work/kpimg         "$BASE/kpimg"
+          chmod +x work/kptools-linux
+          ls -l work/kptools-linux work/kpimg
+          ./work/kptools-linux -V || true
+
+          cp -f "$RAW" work/Image.kpm
+          SIZE_BEFORE=$(stat -c%s work/Image.kpm)
+          ( cd work && ./kptools-linux -p -s 123 -i Image.kpm -k kpimg -o oImage && mv -f oImage Image.kpm )
+          SIZE_AFTER=$(stat -c%s work/Image.kpm)
+          echo "[=] 补丁前 ${SIZE_BEFORE} B  ->  补丁后 ${SIZE_AFTER} B  (kpimg 179808 B)"
+
+          [ "$SIZE_AFTER" -gt "$SIZE_BEFORE" ] || { echo "!! 补丁后没有变大, kptools 可能失败了"; exit 1; }
+          grep -aqF '5.10.270-android12-miwu-sukisu+bbg守护' work/Image.kpm \
+            || { echo "!! 补丁后版本串丢了"; exit 1; }
+          echo "[=] 版本串仍在"
+          if strings -a work/Image.kpm | grep -qiE 'kpatch|kpimg|KernelPatch'; then
+            echo "[=] 镜像中已找到 KernelPatch 相关字符串"
+          else
+            echo "[!] 未找到 KernelPatch 字符串(可能只是被压缩/改名), 但大小已增长"
+          fi
+          echo "[=] KernelPatch 补丁完成"
+
+      - name: 【可选】编译外置 88XXAU 驱动
+        if: ${{ github.event.inputs.enable_88xxau == 'true' }}
+        continue-on-error: true
+        run: bash scripts/build-88xxau.sh
+
+      - name: 打包 AnyKernel3 刷机包
+        run: bash scripts/pack.sh
+
+      - name: 上传刷机包
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-AnyKernel3-270
+          path: work/*.zip
+          if-no-files-found: error
+
+      - name: 上传驱动模块
+        if: ${{ hashFiles('work/modules/*.ko') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-extra-modules-270
+          path: work/modules/*.ko
+
+      - name: 上传内核镜像
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-Image-lz4-270
+          path: kernel/out/arch/arm64/boot/Image.lz4
+
+      - name: 上传 KPM 版内核镜像（已打 KernelPatch）
+        uses: actions/upload-artifact@v4
+        with:
+          name: K60-Image-KPM-270
+          path: work/Image.kpm
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传编译日志（失败时用于定位）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-270
+          path: |
+            work/kernel-build.log
+            kernel/out/.config
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 构建结果汇总
+        if: always()
+        run: |
+          {
+            echo "## 红米 K60 (mondrian) 内核构建结果（社区树 5.10.270）"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|---|---|"
+            echo "| 源码基线 | \`Kuroringo97/android_kernel_xiaomi_mondrian\` @ 5.10.270 |"
+            echo "| 源码提交 | \`$KERNEL_SHA\` |"
+            echo "| SukiSU Ultra | \`$SUKISU_REF\` |"
+            echo "| KPM | $ENABLE_KPM |"
+            echo "| BBG 基带保护 | $ENABLE_BBG |"
+            echo "| SUSFS | $ENABLE_SUSFS |"
+            echo "| LTO | $LTO_MODE |"
+            echo "| 调试信息 | $DEBUG_INFO |"
+            if [ -f kernel/out/include/generated/utsrelease.h ]; then
+              echo "| 内核版本串 | \`$(sed -n 's/^#define UTS_RELEASE "\(.*\)"$/\1/p' kernel/out/include/generated/utsrelease.h)\` |"
+            fi
+            if [ -f kernel/out/.config ]; then
+              echo ""
+              echo "### 关键配置"
+              echo '```'
+              grep -E '^CONFIG_(KSU|KPM|BBG|KSU_SUSFS|LTO_CLANG\w*|CFI_CLANG|LSM|MODVERSIONS|MODULE_UNLOAD|PREEMPT|SMP|KASAN|UBSAN)=' kernel/out/.config || true
+              echo '```'
+              echo ""
+              echo "### vermagic 后缀核对（必须与 ROM 的 vendor 模块一致）"
+              echo '```'
+              grep -a 'mod_unload modversions aarch64' kernel/out/include/generated/utsrelease.h 2>/dev/null || true
+              echo '```'
+            fi
+            echo ""
+            echo "### 产物"
+            echo '```'
+            ls -lh work/ 2>/dev/null || echo "(无)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 发布 Release
+        if: ${{ github.event.inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: ${{ github.event.inputs.release_tag }}
+          files: work/*.zip
+          generate_release_notes: true

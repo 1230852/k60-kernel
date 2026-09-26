@@ -45,7 +45,8 @@ if ls "$WS"/work/modules/*.ko >/dev/null 2>&1; then
 fi
 
 STAMP="$(date -u '+%Y%m%d-%H%M')"
-NAME="K60-mondrian-KernelSU-BBG-${STAMP}"
+# 与内核版本串保持一致: 5.10.270-android12-miwu-sukisu+bbg守护
+NAME="K60-5.10.270-android12-miwu-sukisu+bbg-${STAMP}"
 
 log "生成刷机包"
 ( cd "$STAGE" && zip -r9 "$WS/work/${NAME}.zip" . -x '*.git*' >/dev/null )
